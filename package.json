@@ -1,0 +1,28 @@
+{
+  "name": "drema-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Телеграм-бот «Дрёма» на собственном бэкенде (без Make)",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "postinstall": "prisma generate",
+    "dev": "tsx watch src/bot.ts",
+    "build": "prisma generate && tsc -p tsconfig.json",
+    "start": "prisma migrate deploy && node dist/bot.js",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0",
+    "dotenv": "^16.4.5",
+    "grammy": "^1.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "prisma": "^5.20.0",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.3"
+  }
+}

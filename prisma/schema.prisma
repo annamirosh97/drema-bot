@@ -1,0 +1,103 @@
+// Схема базы данных для бота «Дрёма».
+// Если нужно поменять структуру — правишь этот файл и запускаешь
+// `npm run prisma:migrate` локально (создаст файл миграции),
+// коммитишь и пушишь — на проде миграция применится сама при деплое
+// (см. "start" в package.json: prisma migrate deploy).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Все стадии, в которых может находиться пользователь.
+// Заменяет числовой current_step из Google Sheets — тут понятные имена.
+enum Stage {
+  WELCOME // показано приветствие, ждём "Начать" / "Как я работаю"
+  HOW_IT_WORKS // показано "Как я работаю", ждём "Начать"
+  TERMS // показаны условия, ждём согласие/отказ
+  DECLINE_REASON // ждём текст причины отказа
+  QUESTION // идёт анкета, см. currentQuestionNumber
+  AWAITING_RECOMMENDATION // анкета пройдена, ждём, пока admin пришлёт разбор
+  FAKE_DOOR_OFFER // показан экран оплаты, ждём "Оплатить" / "Не сейчас"
+  CSAT_RATING // ждём оценку 1-5
+  CSAT_FEEDBACK // ждём открытый отзыв
+  CSAT_DONE // всё завершено
+  DECLINED // пользователь отказался проходить анкету
+  OUT_OF_RANGE // возраст ребёнка вне диапазона 4-12 месяцев
+  RED_FLAG_ENDED // анкета остановлена по красному флагу (вопрос 18)
+}
+
+enum SessionStatus {
+  onboarding
+  in_progress
+  completed
+  declined
+  out_of_range
+  red_flag_ended
+}
+
+enum RecommendationStatus {
+  pending
+  sent
+}
+
+model Session {
+  id                  Int           @id @default(autoincrement())
+  telegramId          BigInt        @unique
+  chatId              BigInt
+  firstName           String?
+  stage               Stage         @default(WELCOME)
+  status              SessionStatus @default(onboarding)
+  currentQuestionNumber Float?      // заполнено, когда stage = QUESTION
+  tempSelections      String[]      @default([]) // текущие выбранные варианты multi_choice (до "Готово")
+  yellowFlags         String[]      @default([]) // накопленные жёлтые флаги для ручной проверки
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  answers        Answer[]
+  recommendation Recommendation?
+  fakeDoorOffer  FakeDoorOffer?
+
+  @@index([status])
+}
+
+model Answer {
+  id             Int      @id @default(autoincrement())
+  telegramId     BigInt
+  questionNumber Float // -3 = причина отказа, 30 = CSAT-оценка, 31 = CSAT-отзыв, 99 = доп. инфо после анкеты
+  answerText     String
+  createdAt      DateTime @default(now())
+
+  session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+
+  @@index([telegramId])
+}
+
+model Recommendation {
+  id         Int                  @id @default(autoincrement())
+  telegramId BigInt               @unique
+  message1   String?
+  message2   String?
+  message3   String?
+  message4   String?
+  status     RecommendationStatus @default(pending)
+  sentAt     DateTime?
+  createdAt  DateTime             @default(now())
+
+  session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+}
+
+// Fake door тест: кому и по какой цене показали экран оплаты, кто нажал "Оплатить".
+model FakeDoorOffer {
+  id         Int       @id @default(autoincrement())
+  telegramId BigInt    @unique
+  priceRub   Int
+  shownAt    DateTime  @default(now())
+  clickedAt  DateTime? // NULL, если нажали "Не сейчас" или не нажали ничего
+
+  session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+}
