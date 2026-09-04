@@ -1,6 +1,6 @@
 import { Bot, Context } from "grammy";
 import { env } from "./env";
-import { handleIncoming } from "./engine";
+import { handleIncoming, handleGotoCommand, handleResetCommand } from "./engine";
 import { registerAdminCommands, handleAdminFlowMessage } from "./admin";
 
 const bot = new Bot(env.BOT_TOKEN);
@@ -21,6 +21,18 @@ registerAdminCommands(bot);
 // Явно ловим "/start", чтобы кнопка Start у бота в Telegram сразу
 // показывала приветствие, даже у совсем нового пользователя.
 bot.command("start", (ctx) => handleIncoming(ctx));
+
+// /reset — вернуться в начало бота. Доступна всем: обычный
+// пользователь тоже может захотеть пройти анкету заново.
+bot.command("reset", (ctx) => handleResetCommand(ctx));
+
+// /goto <номер> — прыжок на конкретный вопрос. Только для админа:
+// обычному пользователю прыжки по анкете оставят её с дырами, и разбор
+// придётся готовить по неполным ответам.
+bot.command("goto", (ctx) => {
+  if (String(ctx.from?.id ?? "") !== env.ADMIN_TELEGRAM_ID) return;
+  return handleGotoCommand(ctx, ctx.match?.toString() ?? "");
+});
 
 bot.on("message:text", async (ctx) => {
   const handledByAdminFlow = await handleAdminFlowMessage(bot, ctx);

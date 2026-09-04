@@ -152,13 +152,27 @@ async function resetToWelcomeAndSend(ctx: Context, session: Session) {
 // ── Анкета ───────────────────────────────────────────────────────────
 
 async function sendQuestionPrompt(ctx: Context, question: QuestionDef, selected: string[]) {
+  let markup;
   if (question.type === "single_choice" && question.options) {
-    return ctx.reply(question.text, { reply_markup: singleChoiceKeyboard(question.options) });
+    markup = singleChoiceKeyboard(question.options);
+  } else if (question.type === "multi_choice" && question.options) {
+    markup = multiChoiceKeyboard(question.options, selected);
   }
-  if (question.type === "multi_choice" && question.options) {
-    return ctx.reply(question.text, { reply_markup: multiChoiceKeyboard(question.options, selected) });
+
+  // Если у вопроса есть картинка — отправляем фото, а текст вопроса уходит подписью.
+  // Если Telegram не смог скачать картинку — не роняем анкету, шлём обычным текстом.
+  if (question.photoUrl) {
+    try {
+      return await ctx.replyWithPhoto(question.photoUrl, {
+        caption: question.text,
+        reply_markup: markup,
+      });
+    } catch {
+      // падаем в обычную текстовую отправку ниже
+    }
   }
-  return ctx.reply(question.text);
+
+  return ctx.reply(question.text, markup ? { reply_markup: markup } : undefined);
 }
 
 async function advanceQuestionnaire(ctx: Context, telegramId: bigint, currentQNum: number) {
@@ -258,6 +272,80 @@ async function handleQuestion(ctx: Context, session: Session, callbackData?: str
     await prisma.session.update({ where: { telegramId: session.telegramId }, data: { tempSelections: updated } });
     return ctx.editMessageReplyMarkup({ reply_markup: multiChoiceKeyboard(question.options, updated) }).catch(() => {});
   }
+}
+
+// ── Служебные команды /goto и /reset ────────────────────────────────
+
+function availableQuestionNumbers(): string {
+  return [...QUESTIONS]
+    .map((q) => q.number)
+    .sort((a, b) => a - b)
+    .join(", ");
+}
+
+// /goto <номер> — перепрыгнуть на конкретный вопрос анкеты.
+// Нужна для тестирования: не проходить каждый раз всю анкету с начала,
+// чтобы посмотреть, как выглядит, например, вопрос 12.
+// Ответы на пропущенные вопросы при этом НЕ сохраняются, а уже данные
+// ответы остаются в базе — прыжок меняет только текущую позицию.
+export async function handleGotoCommand(ctx: Context, arg: string) {
+  const from = ctx.from;
+  if (!from || !ctx.chat) return;
+
+  const raw = arg.trim().replace(",", ".");
+  if (!raw) {
+    return ctx.reply(`Использование: /goto <номер вопроса>\n\nДоступные вопросы: ${availableQuestionNumbers()}`);
+  }
+
+  const number = Number(raw);
+  const question = Number.isFinite(number) ? safeGetQuestion(number) : null;
+  if (!question) {
+    return ctx.reply(`Вопроса №${raw} нет.\n\nДоступные вопросы: ${availableQuestionNumbers()}`);
+  }
+
+  const telegramId = BigInt(from.id);
+  await getOrCreateSession(telegramId, BigInt(ctx.chat.id), from.first_name);
+  await prisma.session.update({
+    where: { telegramId },
+    data: {
+      stage: "QUESTION",
+      status: "in_progress",
+      currentQuestionNumber: number,
+      tempSelections: [],
+    },
+  });
+
+  await ctx.reply(`Перешли к вопросу №${number}.`);
+  return sendQuestionPrompt(ctx, question, []);
+}
+
+// /reset — вернуть пользователя на самое начало (экран приветствия)
+// и стереть его ответы, чтобы следующий проход был с чистого листа.
+// Ждущую отправки рекомендацию тоже удаляем: анкета, под которую её
+// готовили, только что стёрлась, и висеть в /pending ей незачем.
+// Запись fakeDoorOffer намеренно остаётся — на ней держится /stats.
+export async function handleResetCommand(ctx: Context) {
+  const from = ctx.from;
+  if (!from || !ctx.chat) return;
+
+  const telegramId = BigInt(from.id);
+  await getOrCreateSession(telegramId, BigInt(ctx.chat.id), from.first_name);
+
+  await prisma.answer.deleteMany({ where: { telegramId } });
+  await prisma.recommendation.deleteMany({ where: { telegramId } });
+  await prisma.session.update({
+    where: { telegramId },
+    data: {
+      stage: "WELCOME",
+      status: "onboarding",
+      currentQuestionNumber: null,
+      tempSelections: [],
+      yellowFlags: [],
+    },
+  });
+
+  await ctx.reply(texts.resetDone);
+  return sendWelcome(ctx);
 }
 
 // ── Ожидание рекомендации (после анкеты, до отправки админом) ──────────

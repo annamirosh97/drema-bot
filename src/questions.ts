@@ -18,6 +18,8 @@ export interface QuestionDef {
   text: string;
   type: InputType;
   options?: string[]; // для multi_choice обязательно включает "Готово"
+  // Картинка к вопросу: текст уходит подписью к фото (лимит подписи в Telegram — 1024 символа).
+  photoUrl?: string;
   min?: number;
   max?: number;
   // Если true — выход за пределы [min, max] завершает анкету (сейчас только вопрос 1).
@@ -99,6 +101,7 @@ export const QUESTIONS: QuestionDef[] = [
       "Чтобы разобраться точнее, расскажите про режим сна малыша. Если ведёте дневник в приложении — можете свериться с ним. Если нет — просто опишите по памяти, как обычно проходит день и ночь.",
     type: "single_choice",
     options: ["Продолжить"],
+    photoUrl: "https://lh3.googleusercontent.com/d/1Ed5sycb_OlBDpER-3IWBZ-3UOLDrSm7X",
   },
   {
     number: 10,
@@ -123,6 +126,7 @@ export const QUESTIONS: QuestionDef[] = [
       "Как малыш засыпает на ночь?",
     type: "multi_choice",
     options: ["Грудь/бутылка", "Укачивание/фитбол", "Коляска", "Самостоятельно", "Готово"],
+    photoUrl: "https://lh3.googleusercontent.com/d/1v7vh_LD_3rpljcLWvZlWASImRJs-V6JG",
   },
   {
     number: 13,
@@ -173,6 +177,7 @@ export const QUESTIONS: QuestionDef[] = [
       "Ничего из этого",
       "Готово",
     ],
+    photoUrl: "https://lh3.googleusercontent.com/d/16B9xPo8EEmv34Uh7F0Gdo9MU_Vbd_Zg-",
     redFlagValues: ["Лечимся у невролога", "Храпит или дышит с паузами"],
     yellowFlagValues: ["Атопия или аллергия"],
     yellowFlagLabel: "атопия/аллергия",
