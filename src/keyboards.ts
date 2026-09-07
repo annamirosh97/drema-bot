@@ -23,6 +23,22 @@ export function multiChoiceKeyboard(options: string[], selected: string[]): Inli
   return kb;
 }
 
+// Экран итоговой анкеты в конце: подтвердить или пойти править ответы.
+export function summaryKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("Всё верно, подтверждаю", "summary_confirm")
+    .row()
+    .text("Внести изменения", "summary_edit");
+}
+
+// «Хотите поправить что-то ещё?» после правки одного ответа.
+export function editMoreKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("Да, поправить ещё", "edit_more_yes")
+    .row()
+    .text("Нет, это всё", "edit_more_no");
+}
+
 export function csatKeyboard(): InlineKeyboard {
   const kb = new InlineKeyboard();
   for (let i = 1; i <= 5; i++) {

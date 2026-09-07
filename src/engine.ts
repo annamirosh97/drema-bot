@@ -3,7 +3,14 @@ import { prisma } from "./prisma";
 import { env } from "./env";
 import { texts } from "./texts";
 import { QUESTIONS, QuestionDef, getFirstQuestionNumber, getNextQuestionNumber, getQuestion } from "./questions";
-import { csatKeyboard, fakeDoorKeyboard, multiChoiceKeyboard, singleChoiceKeyboard } from "./keyboards";
+import {
+  csatKeyboard,
+  editMoreKeyboard,
+  fakeDoorKeyboard,
+  multiChoiceKeyboard,
+  singleChoiceKeyboard,
+  summaryKeyboard,
+} from "./keyboards";
 import type { Session } from "@prisma/client";
 
 // ── Вспомогательные функции работы с БД ─────────────────────────────
@@ -16,7 +23,18 @@ async function getOrCreateSession(telegramId: bigint, chatId: bigint, firstName?
   });
 }
 
+// Служебные записи (-3 причина отказа, 30/31 CSAT, 99 дополнения после
+// анкеты). Их может быть несколько на пользователя, поэтому просто
+// добавляем строку.
 async function saveAnswer(telegramId: bigint, questionNumber: number, answerText: string) {
+  await prisma.answer.create({ data: { telegramId, questionNumber, answerText } });
+}
+
+// Ответ на вопрос анкеты: один вопрос — одна строка в базе. Пользователь
+// может переписать ответ через «Внести изменения» в конце, и тогда
+// старый должен исчезнуть, иначе в /prep попадут оба варианта сразу.
+async function saveQuestionAnswer(telegramId: bigint, questionNumber: number, answerText: string) {
+  await prisma.answer.deleteMany({ where: { telegramId, questionNumber } });
   await prisma.answer.create({ data: { telegramId, questionNumber, answerText } });
 }
 
@@ -63,6 +81,14 @@ export async function handleIncoming(ctx: Context) {
       return handleDeclineReason(ctx, session, messageText);
     case "QUESTION":
       return handleQuestion(ctx, session, callbackData, messageText);
+    case "SUMMARY_REVIEW":
+      return handleSummaryReview(ctx, session, callbackData);
+    case "EDIT_PICK_QUESTION":
+      return handleEditPickQuestion(ctx, session, messageText);
+    case "EDIT_ANSWER":
+      return handleEditAnswer(ctx, session, callbackData, messageText);
+    case "EDIT_MORE":
+      return handleEditMore(ctx, session, callbackData);
     case "AWAITING_RECOMMENDATION":
       return handleAwaitingRecommendation(ctx, session, messageText);
     case "FAKE_DOOR_OFFER":
@@ -206,32 +232,42 @@ async function advanceQuestionnaire(ctx: Context, telegramId: bigint, currentQNu
   const answers = await getAnswersMap(telegramId);
   const next = getNextQuestionNumber(currentQNum, answers);
 
+  // Вопросы кончились — не завершаем анкету сразу, а показываем итог и
+  // даём пользователю сверить ответы (см. handleSummaryReview).
   if (next === null) {
-    await prisma.session.update({
-      where: { telegramId },
-      data: { stage: "AWAITING_RECOMMENDATION", status: "completed", currentQuestionNumber: null },
-    });
-    await prisma.recommendation.upsert({
-      where: { telegramId },
-      update: {},
-      create: { telegramId, status: "pending" },
-    });
-    return ctx.reply(texts.questionnaireComplete);
+    return goToSummary(ctx, telegramId);
   }
 
   await prisma.session.update({ where: { telegramId }, data: { currentQuestionNumber: next } });
   return sendQuestionPrompt(ctx, getQuestion(next), []);
 }
 
-async function handleQuestion(ctx: Context, session: Session, callbackData?: string, messageText?: string) {
-  const qNum = session.currentQuestionNumber;
-  if (qNum == null) return resetToWelcomeAndSend(ctx, session);
-  const question = getQuestion(qNum);
+// Что произошло с присланным ответом. "saved" — ответ записан, дальше
+// решает вызывающий: идти к следующему вопросу (обычный проход анкеты)
+// или вернуться к правке (handleEditAnswer). "handled" — записывать
+// нечего: невалидный ввод, переключение галочки в multi_choice или
+// анкета остановлена по возрасту/красному флагу; пользователю в этих
+// случаях уже ответили внутри.
+type AnswerOutcome = { kind: "handled" } | { kind: "saved" };
 
+async function consumeAnswer(
+  ctx: Context,
+  session: Session,
+  question: QuestionDef,
+  qNum: number,
+  callbackData?: string,
+  messageText?: string
+): Promise<AnswerOutcome> {
   if (question.type === "number") {
-    if (!messageText) return ctx.reply(texts.invalidNumber);
+    if (!messageText) {
+      await ctx.reply(texts.invalidNumber);
+      return { kind: "handled" };
+    }
     const num = Number(messageText.replace(",", "."));
-    if (Number.isNaN(num)) return ctx.reply(texts.invalidNumber);
+    if (Number.isNaN(num)) {
+      await ctx.reply(texts.invalidNumber);
+      return { kind: "handled" };
+    }
 
     if (
       question.outOfRangeEndsFlow &&
@@ -239,69 +275,303 @@ async function handleQuestion(ctx: Context, session: Session, callbackData?: str
       question.max != null &&
       (num < question.min || num > question.max)
     ) {
-      await saveAnswer(session.telegramId, qNum, messageText);
+      await saveQuestionAnswer(session.telegramId, qNum, messageText);
       await prisma.session.update({
         where: { telegramId: session.telegramId },
         data: { stage: "OUT_OF_RANGE", status: "out_of_range" },
       });
-      return ctx.reply(texts.outOfRange);
+      await ctx.reply(texts.outOfRange);
+      return { kind: "handled" };
     }
-    await saveAnswer(session.telegramId, qNum, messageText);
-    return advanceQuestionnaire(ctx, session.telegramId, qNum);
+    await saveQuestionAnswer(session.telegramId, qNum, messageText);
+    return { kind: "saved" };
   }
 
   if (question.type === "free_text") {
-    if (!messageText) return ctx.reply("Напишите, пожалуйста, ответ текстом.");
-    await saveAnswer(session.telegramId, qNum, messageText);
-    return advanceQuestionnaire(ctx, session.telegramId, qNum);
+    if (!messageText) {
+      await ctx.reply("Напишите, пожалуйста, ответ текстом.");
+      return { kind: "handled" };
+    }
+    await saveQuestionAnswer(session.telegramId, qNum, messageText);
+    return { kind: "saved" };
   }
 
   if (question.type === "single_choice") {
     if (!callbackData || !question.options?.includes(callbackData)) {
-      return sendQuestionPrompt(ctx, question, []);
+      await sendQuestionPrompt(ctx, question, []);
+      return { kind: "handled" };
     }
     await markQuestionAnswered(ctx, question, callbackData);
-    await saveAnswer(session.telegramId, qNum, callbackData);
-    return advanceQuestionnaire(ctx, session.telegramId, qNum);
+    await saveQuestionAnswer(session.telegramId, qNum, callbackData);
+    return { kind: "saved" };
   }
 
-  if (question.type === "multi_choice") {
-    if (!callbackData || !question.options?.includes(callbackData)) return;
+  // multi_choice
+  if (!callbackData || !question.options?.includes(callbackData)) return { kind: "handled" };
 
-    if (callbackData === "Готово") {
-      const selections = session.tempSelections;
-      const answerText = selections.join(", ") || "—";
-      await markQuestionAnswered(ctx, question, answerText);
+  if (callbackData === "Готово") {
+    const selections = session.tempSelections;
+    const answerText = selections.join(", ") || "—";
+    await markQuestionAnswered(ctx, question, answerText);
 
-      if (question.redFlagValues?.some((v) => selections.includes(v))) {
-        await saveAnswer(session.telegramId, qNum, answerText);
-        await prisma.session.update({
-          where: { telegramId: session.telegramId },
-          data: { stage: "RED_FLAG_ENDED", status: "red_flag_ended", tempSelections: [] },
-        });
-        return ctx.reply(texts.redFlag);
-      }
-
-      let yellowFlags = session.yellowFlags;
-      if (question.yellowFlagLabel && question.yellowFlagValues?.some((v) => selections.includes(v))) {
-        yellowFlags = Array.from(new Set([...yellowFlags, question.yellowFlagLabel]));
-      }
-
-      await saveAnswer(session.telegramId, qNum, answerText);
+    if (question.redFlagValues?.some((v) => selections.includes(v))) {
+      await saveQuestionAnswer(session.telegramId, qNum, answerText);
       await prisma.session.update({
         where: { telegramId: session.telegramId },
-        data: { tempSelections: [], yellowFlags },
+        data: { stage: "RED_FLAG_ENDED", status: "red_flag_ended", tempSelections: [] },
       });
-      return advanceQuestionnaire(ctx, session.telegramId, qNum);
+      await ctx.reply(texts.redFlag);
+      return { kind: "handled" };
     }
 
-    const already = session.tempSelections.includes(callbackData);
-    const updated = already
-      ? session.tempSelections.filter((v: string) => v !== callbackData)
-      : [...session.tempSelections, callbackData];
-    await prisma.session.update({ where: { telegramId: session.telegramId }, data: { tempSelections: updated } });
-    return ctx.editMessageReplyMarkup({ reply_markup: multiChoiceKeyboard(question.options, updated) }).catch(() => {});
+    let yellowFlags = session.yellowFlags;
+    if (question.yellowFlagLabel && question.yellowFlagValues?.some((v) => selections.includes(v))) {
+      yellowFlags = Array.from(new Set([...yellowFlags, question.yellowFlagLabel]));
+    }
+
+    await saveQuestionAnswer(session.telegramId, qNum, answerText);
+    await prisma.session.update({
+      where: { telegramId: session.telegramId },
+      data: { tempSelections: [], yellowFlags },
+    });
+    return { kind: "saved" };
   }
+
+  const already = session.tempSelections.includes(callbackData);
+  const updated = already
+    ? session.tempSelections.filter((v: string) => v !== callbackData)
+    : [...session.tempSelections, callbackData];
+  await prisma.session.update({ where: { telegramId: session.telegramId }, data: { tempSelections: updated } });
+  await ctx.editMessageReplyMarkup({ reply_markup: multiChoiceKeyboard(question.options, updated) }).catch(() => {});
+  return { kind: "handled" };
+}
+
+async function handleQuestion(ctx: Context, session: Session, callbackData?: string, messageText?: string) {
+  const qNum = session.currentQuestionNumber;
+  if (qNum == null) return resetToWelcomeAndSend(ctx, session);
+  const question = safeGetQuestion(qNum);
+  if (!question) return resetToWelcomeAndSend(ctx, session);
+
+  const outcome = await consumeAnswer(ctx, session, question, qNum, callbackData, messageText);
+  if (outcome.kind !== "saved") return;
+
+  return advanceQuestionnaire(ctx, session.telegramId, qNum);
+}
+
+// ── Итоговая анкета и правка ответов ────────────────────────────────
+
+// Какие вопросы попадают в итоговую анкету: те, на которые есть ответ.
+// Экраны с единственной кнопкой («Продолжить» в вопросе 9) — это не
+// вопрос, а переход дальше, сверять там нечего.
+function summaryQuestions(answers: Record<number, string>): QuestionDef[] {
+  return [...QUESTIONS]
+    .sort((a, b) => a.number - b.number)
+    .filter((q) => q.options?.length !== 1 && answers[q.number] != null);
+}
+
+// Короткая подпись вопроса для списка. Хвост вида "→ Вопрос 9/20" из
+// текста убираем — в итоговой анкете своя сквозная нумерация.
+function questionLabel(question: QuestionDef): string {
+  if (question.shortLabel) return question.shortLabel;
+  const oneLine = question.text
+    .replace(/→\s*Вопрос\s*\d+\s*\/\s*\d+/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return oneLine.length > 90 ? `${oneLine.slice(0, 89)}…` : oneLine;
+}
+
+// Telegram не принимает сообщения длиннее 4096 символов, а итоговая
+// анкета с развёрнутыми ответами про режим дня легко переваливает за
+// лимит. Режем по пустым строкам, чтобы пункт не разрывался посередине.
+function splitForTelegram(text: string, limit = 3500): string[] {
+  const parts: string[] = [];
+  let current = "";
+
+  for (const block of text.split("\n\n")) {
+    const candidate = current ? `${current}\n\n${block}` : block;
+    if (candidate.length <= limit) {
+      current = candidate;
+      continue;
+    }
+    if (current) parts.push(current);
+    if (block.length <= limit) {
+      current = block;
+      continue;
+    }
+    // Один ответ длиннее лимита — режем как есть, по живому.
+    for (let i = 0; i < block.length; i += limit) parts.push(block.slice(i, i + limit));
+    current = "";
+  }
+
+  if (current) parts.push(current);
+  return parts.length ? parts : [text];
+}
+
+async function sendSummary(ctx: Context, telegramId: bigint) {
+  const answers = await getAnswersMap(telegramId);
+  const questions = summaryQuestions(answers);
+
+  // Нумеруем подряд с единицы — именно этот номер пользователь потом
+  // называет, чтобы поправить ответ.
+  const lines = questions.map(
+    (q, i) => `${i + 1}. ${questionLabel(q)}\n— ${answers[q.number]}`
+  );
+
+  for (const chunk of splitForTelegram(`${texts.summaryHeader}\n\n${lines.join("\n\n")}`)) {
+    await ctx.reply(chunk);
+  }
+  return ctx.reply(texts.summaryConfirmPrompt, { reply_markup: summaryKeyboard() });
+}
+
+async function goToSummary(ctx: Context, telegramId: bigint) {
+  await prisma.session.update({
+    where: { telegramId },
+    data: { stage: "SUMMARY_REVIEW", currentQuestionNumber: null, tempSelections: [] },
+  });
+  return sendSummary(ctx, telegramId);
+}
+
+// Убирает кнопки у сообщения, на котором только что нажали, — чтобы на
+// него нельзя было нажать второй раз.
+async function dropKeyboard(ctx: Context) {
+  if (!ctx.callbackQuery?.message) return;
+  await ctx.editMessageReplyMarkup().catch(() => {});
+}
+
+async function handleSummaryReview(ctx: Context, session: Session, callbackData?: string) {
+  if (callbackData === "summary_confirm") {
+    await dropKeyboard(ctx);
+    return finishQuestionnaire(ctx, session.telegramId);
+  }
+
+  if (callbackData === "summary_edit") {
+    await dropKeyboard(ctx);
+    await prisma.session.update({
+      where: { telegramId: session.telegramId },
+      data: { stage: "EDIT_PICK_QUESTION" },
+    });
+    return askWhichQuestionToEdit(ctx, session.telegramId);
+  }
+
+  // Нажатие на кнопку старого, уже отвеченного вопроса выше по чату —
+  // молча игнорируем, чтобы не заваливать человека копиями анкеты.
+  if (callbackData) return;
+  return sendSummary(ctx, session.telegramId);
+}
+
+async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
+  await prisma.session.update({
+    where: { telegramId },
+    data: { stage: "AWAITING_RECOMMENDATION", status: "completed", currentQuestionNumber: null },
+  });
+  await prisma.recommendation.upsert({
+    where: { telegramId },
+    update: {},
+    create: { telegramId, status: "pending" },
+  });
+  return ctx.reply(texts.questionnaireComplete);
+}
+
+async function askWhichQuestionToEdit(ctx: Context, telegramId: bigint) {
+  const answers = await getAnswersMap(telegramId);
+  const count = summaryQuestions(answers).length;
+  return ctx.reply(texts.editPickQuestion(count ? `1–${count}` : "—"));
+}
+
+// Пользователь назвал номер строки из итоговой анкеты.
+async function handleEditPickQuestion(ctx: Context, session: Session, messageText?: string) {
+  const answers = await getAnswersMap(session.telegramId);
+  const questions = summaryQuestions(answers);
+  const position = Number((messageText ?? "").replace(",", ".").trim());
+  const question = Number.isInteger(position) ? questions[position - 1] : undefined;
+
+  if (!question) {
+    return ctx.reply(texts.editUnknownNumber(questions.length ? `1–${questions.length}` : "—"));
+  }
+  return startEditingQuestion(ctx, session.telegramId, question, answers);
+}
+
+// Прошлые галочки multi_choice восстанавливаем из сохранённого ответа,
+// чтобы не отмечать всё заново — достаточно поправить отличия.
+function restoreSelections(question: QuestionDef, saved?: string): string[] {
+  if (!saved || saved === "—") return [];
+  return saved
+    .split(", ")
+    .filter((value) => value !== "Готово" && question.options?.includes(value));
+}
+
+async function startEditingQuestion(
+  ctx: Context,
+  telegramId: bigint,
+  question: QuestionDef,
+  answers: Record<number, string>
+) {
+  const selected = question.type === "multi_choice" ? restoreSelections(question, answers[question.number]) : [];
+  await prisma.session.update({
+    where: { telegramId },
+    data: { stage: "EDIT_ANSWER", currentQuestionNumber: question.number, tempSelections: selected },
+  });
+  return sendQuestionPrompt(ctx, question, selected);
+}
+
+async function handleEditAnswer(ctx: Context, session: Session, callbackData?: string, messageText?: string) {
+  const qNum = session.currentQuestionNumber;
+  if (qNum == null) return goToSummary(ctx, session.telegramId);
+  const question = safeGetQuestion(qNum);
+  if (!question) return goToSummary(ctx, session.telegramId);
+
+  const outcome = await consumeAnswer(ctx, session, question, qNum, callbackData, messageText);
+  if (outcome.kind !== "saved") return;
+
+  return afterEditSaved(ctx, session.telegramId);
+}
+
+// После записи нового ответа проверяем условные вопросы (сейчас это
+// только 4.5, который показывается лишь при ответе «Другое» в вопросе 4).
+// Если условие перестало выполняться — старый ответ убираем, чтобы в
+// разбор не попали противоречивые данные. Если, наоборот, только что
+// стало выполняться — сразу задаём этот вопрос.
+async function afterEditSaved(ctx: Context, telegramId: bigint) {
+  let answers = await getAnswersMap(telegramId);
+
+  const stale = QUESTIONS.filter((q) => q.skipUnless && !q.skipUnless(answers) && answers[q.number] != null);
+  if (stale.length) {
+    await prisma.answer.deleteMany({
+      where: { telegramId, questionNumber: { in: stale.map((q) => q.number) } },
+    });
+    await ctx.reply(texts.editStaleRemoved);
+    answers = await getAnswersMap(telegramId);
+  }
+
+  const nowNeeded = [...QUESTIONS]
+    .sort((a, b) => a.number - b.number)
+    .find((q) => q.skipUnless && q.skipUnless(answers) && answers[q.number] == null);
+  if (nowNeeded) return startEditingQuestion(ctx, telegramId, nowNeeded, answers);
+
+  await prisma.session.update({
+    where: { telegramId },
+    data: { stage: "EDIT_MORE", currentQuestionNumber: null, tempSelections: [] },
+  });
+  return ctx.reply(texts.editMorePrompt, { reply_markup: editMoreKeyboard() });
+}
+
+async function handleEditMore(ctx: Context, session: Session, callbackData?: string) {
+  if (callbackData === "edit_more_yes") {
+    await dropKeyboard(ctx);
+    await prisma.session.update({
+      where: { telegramId: session.telegramId },
+      data: { stage: "EDIT_PICK_QUESTION" },
+    });
+    return askWhichQuestionToEdit(ctx, session.telegramId);
+  }
+
+  if (callbackData === "edit_more_no") {
+    await dropKeyboard(ctx);
+    return goToSummary(ctx, session.telegramId);
+  }
+
+  if (callbackData) return;
+  return ctx.reply(texts.editMorePrompt, { reply_markup: editMoreKeyboard() });
 }
 
 // ── Служебные команды /goto и /reset ────────────────────────────────

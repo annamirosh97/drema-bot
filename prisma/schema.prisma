@@ -21,7 +21,11 @@ enum Stage {
   TERMS // показаны условия, ждём согласие/отказ
   DECLINE_REASON // ждём текст причины отказа
   QUESTION // идёт анкета, см. currentQuestionNumber
-  AWAITING_RECOMMENDATION // анкета пройдена, ждём, пока admin пришлёт разбор
+  SUMMARY_REVIEW // показана итоговая анкета, ждём «Подтвердить» / «Внести изменения»
+  EDIT_PICK_QUESTION // ждём номер вопроса, который пользователь хочет изменить
+  EDIT_ANSWER // переспрашиваем один вопрос, см. currentQuestionNumber
+  EDIT_MORE // ждём ответ «менять ли что-то ещё»
+  AWAITING_RECOMMENDATION // анкета подтверждена, ждём, пока admin пришлёт разбор
   FAKE_DOOR_OFFER // показан экран оплаты, ждём "Оплатить" / "Не сейчас"
   CSAT_RATING // ждём оценку 1-5
   CSAT_FEEDBACK // ждём открытый отзыв
