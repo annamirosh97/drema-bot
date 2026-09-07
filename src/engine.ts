@@ -1,7 +1,7 @@
 import { Api, Context, InlineKeyboard } from "grammy";
 import { prisma } from "./prisma";
 import { env } from "./env";
-import { texts } from "./texts";
+import { photos, texts } from "./texts";
 import { QUESTIONS, QuestionDef, getFirstQuestionNumber, getNextQuestionNumber, getQuestion } from "./questions";
 import {
   csatKeyboard,
@@ -146,7 +146,7 @@ async function handleTerms(ctx: Context, session: Session, callbackData?: string
       where: { telegramId: session.telegramId },
       data: { stage: "QUESTION", status: "in_progress", currentQuestionNumber: first },
     });
-    await ctx.reply(texts.goStart);
+    await replyWithOptionalPhoto(ctx, texts.goStart, photos.goStart);
     return sendQuestionPrompt(ctx, getQuestion(first), []);
   }
   if (callbackData === "terms_decline") {
@@ -177,6 +177,25 @@ async function resetToWelcomeAndSend(ctx: Context, session: Session) {
 
 // ── Анкета ───────────────────────────────────────────────────────────
 
+// Отправляет сообщение с картинкой, если она задана: текст уходит
+// подписью к фото. Если Telegram не смог скачать картинку (битая ссылка,
+// закрытый доступ) — не роняем анкету, шлём обычным текстом.
+async function replyWithOptionalPhoto(
+  ctx: Context,
+  text: string,
+  photoUrl?: string,
+  markup?: InlineKeyboard
+) {
+  if (photoUrl) {
+    try {
+      return await ctx.replyWithPhoto(photoUrl, { caption: text, reply_markup: markup });
+    } catch {
+      // падаем в обычную текстовую отправку ниже
+    }
+  }
+  return ctx.reply(text, markup ? { reply_markup: markup } : undefined);
+}
+
 async function sendQuestionPrompt(ctx: Context, question: QuestionDef, selected: string[]) {
   let markup;
   if (question.type === "single_choice" && question.options) {
@@ -185,20 +204,7 @@ async function sendQuestionPrompt(ctx: Context, question: QuestionDef, selected:
     markup = multiChoiceKeyboard(question.options, selected);
   }
 
-  // Если у вопроса есть картинка — отправляем фото, а текст вопроса уходит подписью.
-  // Если Telegram не смог скачать картинку — не роняем анкету, шлём обычным текстом.
-  if (question.photoUrl) {
-    try {
-      return await ctx.replyWithPhoto(question.photoUrl, {
-        caption: question.text,
-        reply_markup: markup,
-      });
-    } catch {
-      // падаем в обычную текстовую отправку ниже
-    }
-  }
-
-  return ctx.reply(question.text, markup ? { reply_markup: markup } : undefined);
+  return replyWithOptionalPhoto(ctx, question.text, question.photoUrl, markup);
 }
 
 // Перерисовывает сообщение с вопросом после того, как пользователь нажал
@@ -469,7 +475,7 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
     update: {},
     create: { telegramId, status: "pending" },
   });
-  return ctx.reply(texts.questionnaireComplete);
+  return replyWithOptionalPhoto(ctx, texts.questionnaireComplete, photos.questionnaireComplete);
 }
 
 async function askWhichQuestionToEdit(ctx: Context, telegramId: bigint) {

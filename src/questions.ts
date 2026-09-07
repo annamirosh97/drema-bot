@@ -107,7 +107,7 @@ export const QUESTIONS: QuestionDef[] = [
       "Чтобы разобраться точнее, расскажите про режим сна малыша. Если ведёте дневник в приложении — можете свериться с ним. Если нет — просто опишите по памяти, как обычно проходит день и ночь.",
     type: "single_choice",
     options: ["Продолжить"],
-    photoUrl: "https://lh3.googleusercontent.com/d/1Ed5sycb_OlBDpER-3IWBZ-3UOLDrSm7X",
+    photoUrl: "https://lh3.googleusercontent.com/d/1OU3tB9ohUvYq8f2qVvJ4qljCSVwOpoAY",
   },
   {
     number: 10,
@@ -149,7 +149,7 @@ export const QUESTIONS: QuestionDef[] = [
       "Ничего не помогает",
       "Готово",
     ],
-    photoUrl: "https://lh3.googleusercontent.com/d/1v7vh_LD_3rpljcLWvZlWASImRJs-V6JG",
+    photoUrl: "https://lh3.googleusercontent.com/d/1IpfI30brTMLTsOJXOfEKfZlDN53mNd3D",
   },
   {
     number: 13,
@@ -203,7 +203,7 @@ export const QUESTIONS: QuestionDef[] = [
       "Ничего из этого",
       "Готово",
     ],
-    photoUrl: "https://lh3.googleusercontent.com/d/16B9xPo8EEmv34Uh7F0Gdo9MU_Vbd_Zg-",
+    photoUrl: "https://lh3.googleusercontent.com/d/1VAlkUAgBz-7yZ5Ad6H5aKxXdvHfgy4nE",
     redFlagValues: ["Лечимся у невролога", "Храпит или дышит с паузами"],
     yellowFlagValues: ["Атопия или аллергия"],
     yellowFlagLabel: "атопия/аллергия",

@@ -1,5 +1,14 @@
 // Статические тексты бота. Правь прямо здесь так же, как questions.ts.
 
+// Картинки к статическим сообщениям: ключ — имя текста из `texts` ниже.
+// Текст уходит подписью к фото, поэтому такие сообщения должны быть
+// короче 1024 символов (лимит подписи в Telegram). Картинки к вопросам
+// анкеты живут не здесь, а в поле photoUrl в questions.ts.
+export const photos = {
+  goStart: "https://lh3.googleusercontent.com/d/13QrZzZJ-g6Dd6qleotIWZ4Nv7h9wmEX8",
+  questionnaireComplete: "https://lh3.googleusercontent.com/d/12QvjcR_tEhGtiFyp3FP3UfoS4Uo94EBe",
+};
+
 export const texts = {
   welcome: `Привет! 🌙 На связи Дрёма.
 
