@@ -175,6 +175,33 @@ async function sendQuestionPrompt(ctx: Context, question: QuestionDef, selected:
   return ctx.reply(question.text, markup ? { reply_markup: markup } : undefined);
 }
 
+// Перерисовывает сообщение с вопросом после того, как пользователь нажал
+// кнопку: кнопки убираются, а под текстом вопроса остаётся выбранный
+// вариант — чтобы, листая чат вверх, было видно, что где выбрано.
+// Кнопки исчезают именно потому, что в запросе не передаётся reply_markup.
+async function markQuestionAnswered(ctx: Context, question: QuestionDef, chosen: string) {
+  const message = ctx.callbackQuery?.message;
+  if (!message) return;
+
+  // Вопрос с единственной кнопкой (например, «Продолжить» в вопросе 9) —
+  // это не выбор, а просто «дальше»: подпись «Выбрано: Продолжить»
+  // читалась бы странно, поэтому там только убираем кнопку.
+  if (question.options?.length === 1) {
+    await ctx.editMessageReplyMarkup().catch(() => {});
+    return;
+  }
+
+  const body = `${question.text}\n\n${texts.answeredMark(chosen)}`;
+
+  // У вопроса с картинкой текст лежит в подписи к фото, у обычного — в тексте
+  // сообщения, и правятся они разными методами Telegram API.
+  // Если правка не прошла (например, подпись длиннее 1024 символов) — не
+  // роняем анкету: пользователь просто увидит вопрос с кнопками как раньше.
+  const edit =
+    "photo" in message ? ctx.editMessageCaption({ caption: body }) : ctx.editMessageText(body);
+  await edit.catch(() => {});
+}
+
 async function advanceQuestionnaire(ctx: Context, telegramId: bigint, currentQNum: number) {
   const answers = await getAnswersMap(telegramId);
   const next = getNextQuestionNumber(currentQNum, answers);
@@ -233,6 +260,7 @@ async function handleQuestion(ctx: Context, session: Session, callbackData?: str
     if (!callbackData || !question.options?.includes(callbackData)) {
       return sendQuestionPrompt(ctx, question, []);
     }
+    await markQuestionAnswered(ctx, question, callbackData);
     await saveAnswer(session.telegramId, qNum, callbackData);
     return advanceQuestionnaire(ctx, session.telegramId, qNum);
   }
@@ -242,9 +270,11 @@ async function handleQuestion(ctx: Context, session: Session, callbackData?: str
 
     if (callbackData === "Готово") {
       const selections = session.tempSelections;
+      const answerText = selections.join(", ") || "—";
+      await markQuestionAnswered(ctx, question, answerText);
 
       if (question.redFlagValues?.some((v) => selections.includes(v))) {
-        await saveAnswer(session.telegramId, qNum, selections.join(", ") || "—");
+        await saveAnswer(session.telegramId, qNum, answerText);
         await prisma.session.update({
           where: { telegramId: session.telegramId },
           data: { stage: "RED_FLAG_ENDED", status: "red_flag_ended", tempSelections: [] },
@@ -257,7 +287,7 @@ async function handleQuestion(ctx: Context, session: Session, callbackData?: str
         yellowFlags = Array.from(new Set([...yellowFlags, question.yellowFlagLabel]));
       }
 
-      await saveAnswer(session.telegramId, qNum, selections.join(", ") || "—");
+      await saveAnswer(session.telegramId, qNum, answerText);
       await prisma.session.update({
         where: { telegramId: session.telegramId },
         data: { tempSelections: [], yellowFlags },
