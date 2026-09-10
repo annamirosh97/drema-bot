@@ -44,12 +44,23 @@ message2 — наиболее вероятные причины. Что имен
 Обращайся к родителю на «вы». Тон тёплый и спокойный, без снисходительности и без запугивания. Опирайся на конкретные ответы из анкеты, а не на общие слова. Не выдумывай данные, которых в анкете нет: если чего-то не хватает, так и скажи. Каждое сообщение — не длиннее ${MAX_CHARS_PER_MESSAGE} символов. Без markdown-разметки: обычный текст, Telegram её не отображает.
 
 ФОРМАТ ОТВЕТА
-Верни ТОЛЬКО JSON-объект, ровно в таком виде:
-{"message1": "...", "message2": "..."}
-Без markdown-обёрток, без пояснений до или после, без каких-либо других полей.`;
+Верни JSON-объект с двумя полями: message1 и message2. Переносы строк внутри текста ставь как обычно — формат за тебя соблюдёт API.`;
 
-// Модель просят вернуть голый JSON, но на всякий случай снимаем обёртку
-// ```json ... ``` — если она всё-таки появится, парсер об неё споткнётся.
+// Схема ответа. Claude API сам следит, чтобы модель вернула валидный JSON
+// ровно с этими полями (структурированный вывод). Без неё модель ставила
+// внутри строк настоящие переносы строк вместо \n, и JSON.parse падал.
+const OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    message1: { type: "string", description: "Разбор режима сна" },
+    message2: { type: "string", description: "Наиболее вероятные причины" },
+  },
+  required: ["message1", "message2"],
+  additionalProperties: false,
+} as const;
+
+// Формат гарантирован схемой выше, но разбор оставляем защищённым: если
+// ответ всё-таки окажется обёрнут или обрезан, лучше внятная ошибка.
 function stripCodeFence(text: string): string {
   const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
   return (fenced ? fenced[1] : text).trim();
@@ -74,10 +85,17 @@ export async function generateRecommendationDraft(prepText: string): Promise<Rec
     thinking: { type: "adaptive" },
     system: SYSTEM_PROMPT,
     messages: [{ role: "user", content: `Вот заполненная анкета:\n\n${prepText}` }],
+    output_config: { format: { type: "json_schema", schema: OUTPUT_SCHEMA } },
   });
 
   if (response.stop_reason === "refusal") {
     throw new Error("Модель отказалась отвечать на эту анкету.");
+  }
+
+  // Ответ упёрся в лимит и обрезан на середине — разбирать его бессмысленно,
+  // а без этой проверки поломка выглядела бы как ошибка формата.
+  if (response.stop_reason === "max_tokens") {
+    throw new Error("Ответ модели не поместился в лимит и оборвался. Нужно поднять max_tokens в src/claudeApi.ts.");
   }
 
   // В ответе кроме текста могут быть блоки размышлений — берём только текст.
