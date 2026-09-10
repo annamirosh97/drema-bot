@@ -414,17 +414,23 @@ function splitForTelegram(text: string, limit = 3500): string[] {
   return parts.length ? parts : [text];
 }
 
-async function sendSummary(ctx: Context, telegramId: bigint) {
+// Пронумерованный список «вопрос — ответ». Ровно в этом виде анкету
+// видит пользователь на сверке, и в этом же виде она уходит админу
+// после подтверждения, чтобы вы смотрели на одно и то же.
+async function buildSummaryText(telegramId: bigint): Promise<string> {
   const answers = await getAnswersMap(telegramId);
-  const questions = summaryQuestions(answers);
 
   // Нумеруем подряд с единицы — именно этот номер пользователь потом
   // называет, чтобы поправить ответ.
-  const lines = questions.map(
-    (q, i) => `${i + 1}. ${questionLabel(q)}\n— ${answers[q.number]}`
-  );
+  return summaryQuestions(answers)
+    .map((q, i) => `${i + 1}. ${questionLabel(q)}\n— ${answers[q.number]}`)
+    .join("\n\n");
+}
 
-  for (const chunk of splitForTelegram(`${texts.summaryHeader}\n\n${lines.join("\n\n")}`)) {
+async function sendSummary(ctx: Context, telegramId: bigint) {
+  const body = await buildSummaryText(telegramId);
+
+  for (const chunk of splitForTelegram(`${texts.summaryHeader}\n\n${body}`)) {
     await ctx.reply(chunk);
   }
   return ctx.reply(texts.summaryConfirmPrompt, { reply_markup: summaryKeyboard() });
@@ -477,12 +483,41 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
     create: { telegramId, status: "pending" },
   });
 
-  // Генерацию черновика запускаем в фоне и результата не ждём: обращение
-  // к Claude API идёт десятки секунд, а пользователь должен получить своё
-  // сообщение сразу. Черновик придёт тебе в Telegram, когда будет готов.
-  void generateDraftForAdmin(ctx.api, telegramId);
+  // Всё, что дальше, запускаем в фоне и результата не ждём: обращение к
+  // Claude API идёт десятки секунд, а пользователь должен получить своё
+  // сообщение сразу. Отбивка и черновик придут тебе в Telegram сами.
+  void announceAndGenerateDraft(ctx.api, telegramId);
 
   return replyWithOptionalPhoto(ctx, texts.questionnaireComplete, photos.questionnaireComplete);
+}
+
+// Порядок сообщений админу после подтверждения анкеты: сначала отбивка,
+// затем сама анкета, затем «готовлю черновик» и уже сам черновик.
+// Сбой отбивки не должен отменять генерацию — она важнее.
+async function announceAndGenerateDraft(api: Api, telegramId: bigint) {
+  const adminChatId = Number(env.ADMIN_TELEGRAM_ID);
+
+  try {
+    await api.sendMessage(
+      adminChatId,
+      `Пользователь #${telegramId} завершил анкету и ждёт рекомендаций.`
+    );
+    await sendLongMessage(
+      api,
+      BigInt(adminChatId),
+      `Анкета #${telegramId} — в том виде, в каком её подтвердил пользователь:\n\n${await buildSummaryText(telegramId)}`
+    );
+  } catch (error) {
+    console.error(`Не удалось отправить отбивку по анкете #${telegramId}:`, error);
+  }
+
+  await generateDraftForAdmin(api, telegramId);
+}
+
+// Одно и то же сообщение и при автоматической генерации, и при /draft —
+// поэтому текст один, в одном месте.
+export function draftInProgressNote(telegramId: bigint): string {
+  return `Готовлю черновик для #${telegramId}. Займёт до минуты — пришлю, как будет готов.`;
 }
 
 // Готовит черновик разбора и присылает его тебе на проверку — ровно в том
@@ -496,6 +531,8 @@ export async function generateDraftForAdmin(api: Api, telegramId: bigint) {
   const adminChatId = Number(env.ADMIN_TELEGRAM_ID);
 
   try {
+    await api.sendMessage(adminChatId, draftInProgressNote(telegramId));
+
     const draft = await generateRecommendationDraft(await buildPrepText(telegramId));
 
     await prisma.recommendation.update({
@@ -504,8 +541,8 @@ export async function generateDraftForAdmin(api: Api, telegramId: bigint) {
     });
 
     await api.sendMessage(adminChatId, `Черновик разбора для #${telegramId} готов — вот он целиком:`);
-    await sendLongMessage(api, BigInt(adminChatId), draft.message1);
-    await sendLongMessage(api, BigInt(adminChatId), draft.message2);
+    await sendLongMessage(api, BigInt(adminChatId), formatDraftMessage(texts.draftHeading1, draft.message1), true);
+    await sendLongMessage(api, BigInt(adminChatId), formatDraftMessage(texts.draftHeading2, draft.message2), true);
     await api.sendMessage(
       adminChatId,
       `Отправить как есть: /approve ${telegramId}\nНаписать свою версию: /send ${telegramId}`
@@ -750,12 +787,27 @@ async function handleCsatFeedback(ctx: Context, session: Session, messageText?: 
 
 // ── Функции для админки (src/admin.ts) ──────────────────────────────
 
+// Заголовки у сообщений разбора должны быть жирными, а жирный в Telegram
+// возможен только с разметкой. Разметка HTML, и текст в ней приходит от
+// модели — значит, три её служебных символа нужно обезвредить, иначе
+// Telegram либо съест кусок текста, либо откажется принимать сообщение.
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Заголовок применяется при отправке, а не хранится в базе: и админ в
+// черновике, и пользователь в итоге видят одно и то же, а поменять
+// формулировку можно в texts.ts, не переписывая уже готовые черновики.
+function formatDraftMessage(heading: string, body: string): string {
+  return `<b>${escapeHtml(heading)}</b>\n\n${escapeHtml(body)}`;
+}
+
 // Длинное сообщение Telegram не примет (лимит 4096 символов), поэтому
 // шлём по частям. Модель просят писать короче, но подстраховаться дешевле,
 // чем потерять уже готовый разбор на отправке.
-async function sendLongMessage(api: Api, chatId: bigint, text: string) {
+async function sendLongMessage(api: Api, chatId: bigint, text: string, asHtml = false) {
   for (const chunk of splitForTelegram(text)) {
-    await api.sendMessage(Number(chatId), chunk);
+    await api.sendMessage(Number(chatId), chunk, asHtml ? { parse_mode: "HTML" } : undefined);
   }
 }
 
@@ -813,8 +865,8 @@ export async function sendApprovedRecommendation(api: Api, telegramId: bigint, c
     throw new Error("Черновик разбора не найден.");
   }
 
-  await sendLongMessage(api, chatId, recommendation.message1);
-  await sendLongMessage(api, chatId, recommendation.message2);
+  await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading1, recommendation.message1), true);
+  await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading2, recommendation.message2), true);
 
   await markSentAndShowOffer(api, telegramId, chatId);
 }
