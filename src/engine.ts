@@ -488,7 +488,11 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
 // Готовит черновик разбора и присылает его тебе на проверку — ровно в том
 // виде, в каком его увидел бы пользователь. Ничего не бросает наружу:
 // это фоновая задача, и любая ошибка здесь не должна ронять бота.
-async function generateDraftForAdmin(api: Api, telegramId: bigint) {
+//
+// Запускать только через void, не через await: бот обрабатывает входящие
+// сообщения строго по одному, и ожидание ответа модели заморозило бы его
+// для всех остальных на десятки секунд.
+export async function generateDraftForAdmin(api: Api, telegramId: bigint) {
   const adminChatId = Number(env.ADMIN_TELEGRAM_ID);
 
   try {
@@ -513,7 +517,9 @@ async function generateDraftForAdmin(api: Api, telegramId: bigint) {
       .sendMessage(
         adminChatId,
         `Не получилось подготовить черновик для #${telegramId}.\n\nПричина: ${reason}\n\n` +
-          `Анкета цела, пользователь ждёт. Собрать разбор вручную: /prep ${telegramId}, затем /send ${telegramId}`
+          `Анкета цела, пользователь ждёт.\n` +
+          `Попробовать ещё раз: /draft ${telegramId}\n` +
+          `Собрать вручную: /prep ${telegramId}, затем /send ${telegramId}`
       )
       .catch((sendError) => console.error("И сообщить об этом в Telegram тоже не вышло:", sendError));
   }

@@ -1,7 +1,12 @@
 import { Bot, Context } from "grammy";
 import { prisma } from "./prisma";
 import { env } from "./env";
-import { deliverRecommendation, buildPrepText, sendApprovedRecommendation } from "./engine";
+import {
+  deliverRecommendation,
+  buildPrepText,
+  sendApprovedRecommendation,
+  generateDraftForAdmin,
+} from "./engine";
 
 function isAdmin(ctx: Context): boolean {
   return String(ctx.from?.id ?? "") === env.ADMIN_TELEGRAM_ID;
@@ -66,6 +71,40 @@ export function registerAdminCommands(bot: Bot) {
 
     sendFlows.set(ctx.from!.id, { telegramId, chatId: session.chatId, messages: [], stage: "collecting" });
     await ctx.reply(`Собираю разбор для #${telegramId}. Пришли сообщение 1 из 4.\n\nОтменить в любой момент — /cancel`);
+  });
+
+  // Переподготовить черновик для уже заполненной анкеты. Нужна, когда
+  // автоматическая генерация сорвалась: анкета готова, а черновика нет.
+  bot.command("draft", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const idStr = ctx.match?.toString().trim();
+    if (!idStr) return ctx.reply("Использование: /draft <telegram_id>");
+    let telegramId: bigint;
+    try {
+      telegramId = BigInt(idStr);
+    } catch {
+      return ctx.reply("telegram_id должен быть числом.");
+    }
+
+    const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+    if (!recommendation) {
+      return ctx.reply(
+        `#${telegramId} ещё не подтвердил анкету — готовить черновик не из чего.\n\n` +
+          `Кто закончил и ждёт разбора: /pending`
+      );
+    }
+    if (recommendation.status === "sent") {
+      const when = recommendation.sentAt?.toLocaleString("ru-RU") ?? "раньше";
+      return ctx.reply(
+        `Разбор для #${telegramId} уже отправлен (${when}), новый черновик его не заменит.\n\n` +
+          `Если нужна другая версия — /send ${telegramId}`
+      );
+    }
+
+    // Не ждём результата: бот обрабатывает сообщения по одному, и ожидание
+    // ответа модели заморозило бы его для остальных на десятки секунд.
+    await ctx.reply(`Готовлю черновик для #${telegramId}. Займёт до минуты — пришлю, как будет готов.`);
+    void generateDraftForAdmin(bot.api, telegramId);
   });
 
   // Отправить пользователю черновик, который бот подготовил сам.
