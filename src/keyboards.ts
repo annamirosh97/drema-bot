@@ -49,7 +49,7 @@ export function csatKeyboard(): InlineKeyboard {
 
 export function fakeDoorKeyboard(price: number): InlineKeyboard {
   return new InlineKeyboard()
-    .text(`Оплатить ${price} ₽`, "fakedoor_pay")
+    .text(`Купить за ${price} ₽`, "fakedoor_pay")
     .row()
     .text("Не сейчас", "fakedoor_skip");
 }

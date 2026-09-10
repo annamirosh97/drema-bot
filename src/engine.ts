@@ -2,6 +2,7 @@ import { Api, Context, InlineKeyboard } from "grammy";
 import { prisma } from "./prisma";
 import { env } from "./env";
 import { photos, texts } from "./texts";
+import { generateRecommendationDraft } from "./claudeApi";
 import { QUESTIONS, QuestionDef, getFirstQuestionNumber, getNextQuestionNumber, getQuestion } from "./questions";
 import {
   csatKeyboard,
@@ -475,7 +476,47 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
     update: {},
     create: { telegramId, status: "pending" },
   });
+
+  // Генерацию черновика запускаем в фоне и результата не ждём: обращение
+  // к Claude API идёт десятки секунд, а пользователь должен получить своё
+  // сообщение сразу. Черновик придёт тебе в Telegram, когда будет готов.
+  void generateDraftForAdmin(ctx.api, telegramId);
+
   return replyWithOptionalPhoto(ctx, texts.questionnaireComplete, photos.questionnaireComplete);
+}
+
+// Готовит черновик разбора и присылает его тебе на проверку — ровно в том
+// виде, в каком его увидел бы пользователь. Ничего не бросает наружу:
+// это фоновая задача, и любая ошибка здесь не должна ронять бота.
+async function generateDraftForAdmin(api: Api, telegramId: bigint) {
+  const adminChatId = Number(env.ADMIN_TELEGRAM_ID);
+
+  try {
+    const draft = await generateRecommendationDraft(await buildPrepText(telegramId));
+
+    await prisma.recommendation.update({
+      where: { telegramId },
+      data: { message1: draft.message1, message2: draft.message2 },
+    });
+
+    await api.sendMessage(adminChatId, `Черновик разбора для #${telegramId} готов — вот он целиком:`);
+    await sendLongMessage(api, BigInt(adminChatId), draft.message1);
+    await sendLongMessage(api, BigInt(adminChatId), draft.message2);
+    await api.sendMessage(
+      adminChatId,
+      `Отправить как есть: /approve ${telegramId}\nНаписать свою версию: /send ${telegramId}`
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`Не удалось подготовить черновик для #${telegramId}:`, error);
+    await api
+      .sendMessage(
+        adminChatId,
+        `Не получилось подготовить черновик для #${telegramId}.\n\nПричина: ${reason}\n\n` +
+          `Анкета цела, пользователь ждёт. Собрать разбор вручную: /prep ${telegramId}, затем /send ${telegramId}`
+      )
+      .catch((sendError) => console.error("И сообщить об этом в Telegram тоже не вышло:", sendError));
+  }
 }
 
 async function askWhichQuestionToEdit(ctx: Context, telegramId: bigint) {
@@ -666,7 +707,9 @@ async function handleAwaitingRecommendation(ctx: Context, session: Session, mess
 
 async function handleFakeDoor(ctx: Context, session: Session, callbackData?: string) {
   const offer = await prisma.fakeDoorOffer.findUnique({ where: { telegramId: session.telegramId } });
-  const price = offer?.priceRub ?? env.FAKE_DOOR_PRICES[0] ?? 490;
+  // Цену берём из записи оффера: у тех, кому её показали до перехода на
+  // единую цену, там осталась своя.
+  const price = offer?.priceRub ?? env.PRODUCT_PRICE_RUB;
 
   if (callbackData === "fakedoor_pay") {
     await prisma.fakeDoorOffer
@@ -674,7 +717,7 @@ async function handleFakeDoor(ctx: Context, session: Session, callbackData?: str
       .catch(() => {});
     await ctx.reply(texts.fakeDoorClicked);
   } else if (callbackData !== "fakedoor_skip") {
-    return ctx.reply(texts.fakeDoorOffer(price), { reply_markup: fakeDoorKeyboard(price) });
+    return ctx.reply(texts.fakeDoorOffer, { reply_markup: fakeDoorKeyboard(price) });
   }
 
   await prisma.session.update({ where: { telegramId: session.telegramId }, data: { stage: "CSAT_RATING" } });
@@ -701,33 +744,24 @@ async function handleCsatFeedback(ctx: Context, session: Session, messageText?: 
 
 // ── Функции для админки (src/admin.ts) ──────────────────────────────
 
-// Отправляет 4 сообщения с рекомендацией, помечает Recommendation как
-// отправленную и переводит пользователя на экран fake door оплаты.
-export async function deliverRecommendation(
-  api: Api,
-  telegramId: bigint,
-  chatId: bigint,
-  messages: [string, string, string, string]
-) {
-  for (const m of messages) {
-    await api.sendMessage(Number(chatId), m);
+// Длинное сообщение Telegram не примет (лимит 4096 символов), поэтому
+// шлём по частям. Модель просят писать короче, но подстраховаться дешевле,
+// чем потерять уже готовый разбор на отправке.
+async function sendLongMessage(api: Api, chatId: bigint, text: string) {
+  for (const chunk of splitForTelegram(text)) {
+    await api.sendMessage(Number(chatId), chunk);
   }
+}
 
+// Общий хвост обоих путей — и ручного /send, и автоматического /approve:
+// помечаем рекомендацию отправленной и показываем экран оплаты.
+async function markSentAndShowOffer(api: Api, telegramId: bigint, chatId: bigint) {
   await prisma.recommendation.update({
     where: { telegramId },
-    data: {
-      status: "sent",
-      sentAt: new Date(),
-      message1: messages[0],
-      message2: messages[1],
-      message3: messages[2],
-      message4: messages[3],
-    },
+    data: { status: "sent", sentAt: new Date() },
   });
 
-  const prices = env.FAKE_DOOR_PRICES.length ? env.FAKE_DOOR_PRICES : [490];
-  const price = prices[Math.floor(Math.random() * prices.length)];
-
+  const price = env.PRODUCT_PRICE_RUB;
   await prisma.fakeDoorOffer.upsert({
     where: { telegramId },
     update: { priceRub: price, shownAt: new Date(), clickedAt: null },
@@ -736,9 +770,47 @@ export async function deliverRecommendation(
 
   await prisma.session.update({ where: { telegramId }, data: { stage: "FAKE_DOOR_OFFER" } });
 
-  await api.sendMessage(Number(chatId), texts.fakeDoorOffer(price), {
+  await api.sendMessage(Number(chatId), texts.fakeDoorOffer, {
     reply_markup: fakeDoorKeyboard(price),
   });
+}
+
+// Ручной путь (/send): 4 сообщения, собранные тобой в переписке с ботом.
+export async function deliverRecommendation(
+  api: Api,
+  telegramId: bigint,
+  chatId: bigint,
+  messages: [string, string, string, string]
+) {
+  for (const m of messages) {
+    await sendLongMessage(api, chatId, m);
+  }
+
+  await prisma.recommendation.update({
+    where: { telegramId },
+    data: {
+      message1: messages[0],
+      message2: messages[1],
+      message3: messages[2],
+      message4: messages[3],
+    },
+  });
+
+  await markSentAndShowOffer(api, telegramId, chatId);
+}
+
+// Автоматический путь (/approve): отправляем пользователю тот черновик,
+// который бот подготовил сам и показал тебе на проверку.
+export async function sendApprovedRecommendation(api: Api, telegramId: bigint, chatId: bigint) {
+  const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+  if (!recommendation?.message1 || !recommendation?.message2) {
+    throw new Error("Черновик разбора не найден.");
+  }
+
+  await sendLongMessage(api, chatId, recommendation.message1);
+  await sendLongMessage(api, chatId, recommendation.message2);
+
+  await markSentAndShowOffer(api, telegramId, chatId);
 }
 
 // Текстовый дамп "Вопрос/Ответ" для конкретного пользователя — чтобы

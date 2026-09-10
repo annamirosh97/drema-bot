@@ -1,7 +1,7 @@
 import { Bot, Context } from "grammy";
 import { prisma } from "./prisma";
 import { env } from "./env";
-import { deliverRecommendation, buildPrepText } from "./engine";
+import { deliverRecommendation, buildPrepText, sendApprovedRecommendation } from "./engine";
 
 function isAdmin(ctx: Context): boolean {
   return String(ctx.from?.id ?? "") === env.ADMIN_TELEGRAM_ID;
@@ -66,6 +66,43 @@ export function registerAdminCommands(bot: Bot) {
 
     sendFlows.set(ctx.from!.id, { telegramId, chatId: session.chatId, messages: [], stage: "collecting" });
     await ctx.reply(`Собираю разбор для #${telegramId}. Пришли сообщение 1 из 4.\n\nОтменить в любой момент — /cancel`);
+  });
+
+  // Отправить пользователю черновик, который бот подготовил сам.
+  // Если нужна своя версия — не /approve, а /send: он перезапишет черновик.
+  bot.command("approve", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const idStr = ctx.match?.toString().trim();
+    if (!idStr) return ctx.reply("Использование: /approve <telegram_id>");
+    let telegramId: bigint;
+    try {
+      telegramId = BigInt(idStr);
+    } catch {
+      return ctx.reply("telegram_id должен быть числом.");
+    }
+
+    const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+    if (!recommendation?.message1 || !recommendation?.message2) {
+      return ctx.reply(
+        `Черновика для #${telegramId} нет — видимо, автоматическая подготовка не сработала.\n\n` +
+          `Собрать вручную: /prep ${telegramId}, затем /send ${telegramId}`
+      );
+    }
+    if (recommendation.status === "sent") {
+      const when = recommendation.sentAt?.toLocaleString("ru-RU") ?? "раньше";
+      return ctx.reply(`Разбор для #${telegramId} уже отправлен (${when}).`);
+    }
+
+    const session = await prisma.session.findUnique({ where: { telegramId } });
+    if (!session) return ctx.reply("Такого пользователя нет в базе.");
+
+    try {
+      await sendApprovedRecommendation(bot.api, telegramId, session.chatId);
+      await ctx.reply(`Готово: разбор #${telegramId} отправлен, экран оплаты показан.`);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await ctx.reply(`Не получилось отправить разбор #${telegramId}.\n\nПричина: ${reason}`);
+    }
   });
 
   bot.command("stats", async (ctx) => {
