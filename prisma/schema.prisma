@@ -86,6 +86,9 @@ model Recommendation {
   telegramId BigInt               @unique
   message1   String?
   message2   String?
+  // Блок ВЫВОДЫ из первого вызова: по нему второй вызов пишет текст.
+  // Храним, чтобы разбирать спорные разборы и не считать анализ заново.
+  analysis   String?
   message3   String?
   message4   String?
   status     RecommendationStatus @default(pending)
@@ -104,4 +107,24 @@ model FakeDoorOffer {
   clickedAt  DateTime? // NULL, если нажали "Не сейчас" или не нажали ничего
 
   session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+}
+
+// Каждое обращение к Claude API: токены, время и стоимость. Нужна, чтобы
+// сравнивать модели и видеть реальную цену разбора (см. /cost в админке).
+// Запись ведётся в try/catch — сбой логирования не должен ломать генерацию.
+model ApiCall {
+  id                  Int      @id @default(autoincrement())
+  step                String // analysis | writer
+  model               String
+  sessionId           String // telegramId пользователя строкой
+  inputTokens         Int
+  outputTokens        Int
+  cacheCreationTokens Int
+  cacheReadTokens     Int
+  durationMs          Int
+  stopReason          String?
+  costUsd             Float? // null, если модели нет в таблице цен
+  createdAt           DateTime @default(now())
+
+  @@index([createdAt])
 }

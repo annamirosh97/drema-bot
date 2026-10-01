@@ -2,7 +2,12 @@ import { Api, Context, InlineKeyboard } from "grammy";
 import { prisma } from "./prisma";
 import { env } from "./env";
 import { photos, texts } from "./texts";
-import { generateRecommendationDraft } from "./claudeApi";
+import {
+  ApiCallUsage,
+  RedFlagError,
+  formatUsageLine,
+  generateRecommendationDraft,
+} from "./claudeApi";
 import { QUESTIONS, QuestionDef, getFirstQuestionNumber, getNextQuestionNumber, getQuestion } from "./questions";
 import {
   csatKeyboard,
@@ -533,33 +538,106 @@ export async function generateDraftForAdmin(api: Api, telegramId: bigint) {
   try {
     await api.sendMessage(adminChatId, draftInProgressNote(telegramId));
 
-    const draft = await generateRecommendationDraft(await buildPrepText(telegramId));
+    const draft = await generateRecommendationDraft(await buildPrepText(telegramId), String(telegramId));
+    await recordApiCalls(draft.usage);
 
     await prisma.recommendation.update({
       where: { telegramId },
-      data: { message1: draft.message1, message2: draft.message2 },
+      data: { message1: draft.message1, message2: draft.message2, analysis: draft.analysis },
     });
 
     await api.sendMessage(adminChatId, `Черновик разбора для #${telegramId} готов — вот он целиком:`);
     await sendLongMessage(api, BigInt(adminChatId), formatDraftMessage(texts.draftHeading1, draft.message1), true);
     await sendLongMessage(api, BigInt(adminChatId), formatDraftMessage(texts.draftHeading2, draft.message2), true);
+
+    const warningLine = draft.warnings.length ? `\n\n⚠️ ${draft.warnings.join("; ")}` : "";
     await api.sendMessage(
       adminChatId,
-      `Отправить как есть: /approve ${telegramId}\nНаписать свою версию: /send ${telegramId}`
+      `${formatUsageLine(draft.usage)}\nВыводы анализа: /analysis ${telegramId}${warningLine}\n\n` +
+        `Отправить как есть: /approve ${telegramId}\nНаписать свою версию: /send ${telegramId}`
     );
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    console.error(`Не удалось подготовить черновик для #${telegramId}:`, error);
-    await api
-      .sendMessage(
-        adminChatId,
-        `Не получилось подготовить черновик для #${telegramId}.\n\nПричина: ${reason}\n\n` +
-          `Анкета цела, пользователь ждёт.\n` +
-          `Попробовать ещё раз: /draft ${telegramId}\n` +
-          `Собрать вручную: /prep ${telegramId}, затем /send ${telegramId}`
-      )
-      .catch((sendError) => console.error("И сообщить об этом в Telegram тоже не вышло:", sendError));
+    // Красный флаг — не поломка: анкета дошла до анализа и он сказал, что
+    // писать разбор нельзя. Родителю ничего не отправляем.
+    if (error instanceof RedFlagError) {
+      await prisma.recommendation
+        .update({ where: { telegramId }, data: { analysis: error.analysis } })
+        .catch((dbError) => console.error("Не удалось сохранить выводы анализа:", dbError));
+      await api
+        .sendMessage(
+          adminChatId,
+          `В анкете #${telegramId} красный флаг — черновик не создан, пользователю ничего не отправлено.\n\n` +
+            `Что нашёл анализ:\n${error.analysis}`
+        )
+        .catch((sendError) => console.error("И сообщить об этом не вышло:", sendError));
+      return;
+    }
+    return reportDraftFailure(api, adminChatId, telegramId, error);
   }
+}
+
+// Отладочный прогон для /regen: оба шага по сохранённым ответам анкеты.
+// Присылает админу блок ВЫВОДЫ, оба сообщения и строку с ценой.
+// Черновик в базе НЕ трогает — это проба промптов, а не новая версия
+// разбора; результат нужно смотреть глазами и при желании повторить
+// обычным /draft.
+export async function regenerateForAdmin(api: Api, telegramId: bigint) {
+  const adminChatId = Number(env.ADMIN_TELEGRAM_ID);
+
+  try {
+    await api.sendMessage(adminChatId, `Пробный прогон для #${telegramId}. Черновик не перезапишу.`);
+
+    const draft = await generateRecommendationDraft(await buildPrepText(telegramId), String(telegramId));
+    await recordApiCalls(draft.usage);
+
+    await sendLongMessage(api, BigInt(adminChatId), `ВЫВОДЫ (шаг 1):\n\n${draft.analysis}`);
+    await sendLongMessage(api, BigInt(adminChatId), formatDraftMessage(texts.draftHeading1, draft.message1), true);
+    await sendLongMessage(api, BigInt(adminChatId), formatDraftMessage(texts.draftHeading2, draft.message2), true);
+
+    const warningLine = draft.warnings.length ? `\n⚠️ ${draft.warnings.join("; ")}` : "";
+    await api.sendMessage(
+      adminChatId,
+      `${formatUsageLine(draft.usage)}${warningLine}\n\nЭто проба: сохранённый черновик не изменился.`
+    );
+  } catch (error) {
+    if (error instanceof RedFlagError) {
+      await api
+        .sendMessage(adminChatId, `Пробный прогон #${telegramId}: красный флаг.\n\n${error.analysis}`)
+        .catch((sendError) => console.error("И сообщить об этом не вышло:", sendError));
+      return;
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`Пробный прогон для #${telegramId} не удался:`, error);
+    await api
+      .sendMessage(adminChatId, `Пробный прогон #${telegramId} не удался.\n\nПричина: ${reason}`)
+      .catch((sendError) => console.error("И сообщить об этом не вышло:", sendError));
+  }
+}
+
+// Пишем в базу по одной записи и не роняем генерацию, если не вышло:
+// это статистика, а не рабочие данные.
+async function recordApiCalls(usage: ApiCallUsage[]) {
+  for (const call of usage) {
+    try {
+      await prisma.apiCall.create({ data: call });
+    } catch (error) {
+      console.error("Не удалось записать обращение к Claude API в базу:", error);
+    }
+  }
+}
+
+async function reportDraftFailure(api: Api, adminChatId: number, telegramId: bigint, error: unknown) {
+  const reason = error instanceof Error ? error.message : String(error);
+  console.error(`Не удалось подготовить черновик для #${telegramId}:`, error);
+  await api
+    .sendMessage(
+      adminChatId,
+      `Не получилось подготовить черновик для #${telegramId}.\n\nПричина: ${reason}\n\n` +
+        `Анкета цела, пользователь ждёт.\n` +
+        `Попробовать ещё раз: /draft ${telegramId}\n` +
+        `Собрать вручную: /prep ${telegramId}, затем /send ${telegramId}`
+    )
+    .catch((sendError) => console.error("И сообщить об этом в Telegram тоже не вышло:", sendError));
 }
 
 async function askWhichQuestionToEdit(ctx: Context, telegramId: bigint) {

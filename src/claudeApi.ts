@@ -1,128 +1,302 @@
 // Обращение к Claude API: по заполненной анкете готовит черновик разбора.
 // Вызывается автоматически, как только пользователь подтвердил анкету
-// (см. finishQuestionnaire в src/engine.ts). Результат уходит тебе в
-// Telegram на проверку, пользователю сам по себе он не отправляется.
+// (см. finishQuestionnaire в src/engine.ts). Результат уходит админу
+// на проверку, пользователю сам по себе он не отправляется.
+//
+// Два шага вместо одного:
+//   1. АНАЛИЗ  — системный промпт METHODOLOGY_ANALYSIS, на входе анкета,
+//      на выходе блок ВЫВОДЫ. Родителю этот текст не показывается.
+//   2. ПИСЬМО  — системный промпт VOICE_PROMPT, на входе блок ВЫВОДЫ,
+//      на выходе два сообщения, разделённые маркерами.
+// Так дешевле (в каждый вызов уходит только нужная часть методологии)
+// и текст получается ближе по тону к ручной работе.
 
 import Anthropic from "@anthropic-ai/sdk";
 import { env } from "./env";
-import { METHODOLOGY } from "./methodology";
+import { METHODOLOGY_ANALYSIS } from "./methodology-analysis";
+import { VOICE_PROMPT } from "./voicePrompt";
+
+// ── Цены ────────────────────────────────────────────────────────────
+
+// Доллары за миллион токенов. ПРОВЕРИТЬ АКТУАЛЬНОСТЬ: цены меняются,
+// сверяться с anthropic.com/pricing. Сверено 01.10.2026.
+const PRICE_PER_MTOK: Record<string, { input: number; output: number }> = {
+  "claude-opus-5": { input: 5, output: 25 },
+  "claude-sonnet-5": { input: 2, output: 10 },
+  "claude-haiku-4-5": { input: 1, output: 5 },
+};
+
+// Запись в кэш дороже обычного входа, чтение из кэша — заметно дешевле.
+const CACHE_WRITE_MULTIPLIER = 1.25;
+const CACHE_READ_MULTIPLIER = 0.1;
+
+// Незнакомая модель — не повод падать: пишем null и считаем токены дальше.
+function computeCostUsd(model: string, u: UsageCounters): number | null {
+  const price = PRICE_PER_MTOK[model];
+  if (!price) return null;
+  const input =
+    u.inputTokens * price.input +
+    u.cacheCreationTokens * price.input * CACHE_WRITE_MULTIPLIER +
+    u.cacheReadTokens * price.input * CACHE_READ_MULTIPLIER;
+  return (input + u.outputTokens * price.output) / 1_000_000;
+}
+
+// ── Что отдаём наружу ───────────────────────────────────────────────
+
+interface UsageCounters {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+}
+
+export interface ApiCallUsage extends UsageCounters {
+  step: "analysis" | "writer";
+  model: string;
+  sessionId: string;
+  durationMs: number;
+  stopReason: string | null;
+  costUsd: number | null;
+}
 
 export interface RecommendationDraft {
+  analysis: string;
   message1: string;
   message2: string;
+  usage: ApiCallUsage[];
+  // Непустой список означает: отправлять можно, но админу стоит взглянуть.
+  warnings: string[];
 }
 
-// Оба сообщения уходят в Telegram, где лимит одного сообщения — 4096
-// символов. Просим с запасом: попросить короче дешевле, чем чинить
-// разорванный текст на стороне бота.
-const MAX_CHARS_PER_MESSAGE = 3000;
-
-const SYSTEM_PROMPT = `Ты — «Дрёма», помощник по детскому сну. К тебе обращаются родители детей 4–12 месяцев. Ниже методология, по которой ты готовишь разбор.
-
-${METHODOLOGY}
-
-ЧТО ИЗ МЕТОДОЛОГИИ ЗДЕСЬ НЕ ПРИМЕНЯЕТСЯ
-Методология описывает разбор из четырёх сообщений и самопроверку по всем четырём. Здесь это не так: ты готовишь только первые два. Всё, что относится к сообщениям 3 и 4 — персональные рекомендации, тактика, «что делать дальше», сроки, — не пиши. Эталонный пример в части 4 читай как ориентир по тону и глубине разбора, а не как образец структуры: его сообщения 3 и 4 к твоей задаче не относятся.
-Диагностическую часть методологии применяй полностью — нормы, диагностический алгоритм и его порядок шагов, шесть категорий причин, кросс-проверки, правила тона и обязательные правила. Это и есть главное.
-Из отсутствия сообщений 3 и 4 следует два уточнения:
-• Нормализацию («это временно, с этим сталкивается большинство родителей») методология размещает в сообщении 1 или в конце сообщения 4. Сообщения 4 нет — значит, она обязательно должна прозвучать в message1 или message2.
-• То, что уже хорошо (обязательное правило 9), тоже назови в message1 или message2: минимум одну-две конкретные вещи про этого ребёнка.
-Оба сообщения уходят родителю в том виде, в каком ты их написал. Поэтому служебные пометки методологии вида [НЕДОСТАТОЧНО ДАННЫХ: ...] в текст не вставляй: если данных не хватает или ответ выглядит сбоем ввода, скажи об этом словами, обращёнными к родителю.
-
-ЗАДАЧА
-По заполненной анкете подготовь РОВНО два сообщения:
-
-message1 — разбор режима сна. Что происходит с режимом малыша: как соотносятся бодрствование, дневные сны и ночь, где режим расходится с возрастными ориентирами, а где это индивидуальная норма. Опиши картину, которую видишь.
-
-message2 — наиболее вероятные причины. Что именно, по твоей оценке, приводит к описанным проблемам. Расставь причины по вероятности и объясни, на чём основан вывод.
-
-ЧЕГО В ОТВЕТЕ БЫТЬ НЕ ДОЛЖНО
-Не давай персональных рекомендаций, планов, расписаний, техник и тактик — ничего из разряда «что делать». Это отдельный платный продукт, и его содержимое в бесплатную часть попадать не должно. Останавливайся на том, ЧТО происходит и ПОЧЕМУ; ЧТО С ЭТИМ ДЕЛАТЬ — не твоя часть.
-Не ставь диагнозов и не отменяй назначения врача.
-
-КАК ПИСАТЬ
-Обращайся к родителю на «вы». Тон тёплый и спокойный, без снисходительности и без запугивания. Опирайся на конкретные ответы из анкеты, а не на общие слова. Не выдумывай данные, которых в анкете нет: если чего-то не хватает, так и скажи. Каждое сообщение — не длиннее ${MAX_CHARS_PER_MESSAGE} символов. Без markdown-разметки: обычный текст, Telegram её не отображает.
-
-ФОРМАТ ОТВЕТА
-Верни JSON-объект с двумя полями: message1 и message2. Переносы строк внутри текста ставь как обычно — формат за тебя соблюдёт API.`;
-
-// Схема ответа. Claude API сам следит, чтобы модель вернула валидный JSON
-// ровно с этими полями (структурированный вывод). Без неё модель ставила
-// внутри строк настоящие переносы строк вместо \n, и JSON.parse падал.
-const OUTPUT_SCHEMA = {
-  type: "object",
-  properties: {
-    message1: { type: "string", description: "Разбор режима сна" },
-    message2: { type: "string", description: "Наиболее вероятные причины" },
-  },
-  required: ["message1", "message2"],
-  additionalProperties: false,
-} as const;
-
-// Формат гарантирован схемой выше, но разбор оставляем защищённым: если
-// ответ всё-таки окажется обёрнут или обрезан, лучше внятная ошибка.
-function stripCodeFence(text: string): string {
-  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
-  return (fenced ? fenced[1] : text).trim();
-}
-
-function requireMessage(value: unknown, field: string): string {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`В ответе модели нет непустого поля ${field}.`);
+// Красный флаг — не сбой, а штатный исход: черновик не создаём,
+// родителю ничего не шлём. Отдельный тип, чтобы вызывающий код отличил
+// это от поломки и написал админу по делу.
+export class RedFlagError extends Error {
+  constructor(public readonly analysis: string) {
+    super("В анкете красный флаг — черновик не создан.");
+    this.name = "RedFlagError";
   }
-  return value.trim();
 }
 
-// Бросает понятную ошибку на любой нештатной ситуации: вызывающий код
-// её ловит, пишет тебе в Telegram и предлагает собрать разбор вручную.
-// Ронять из-за этого бота нельзя — пользователь свою анкету уже сдал.
-export async function generateRecommendationDraft(prepText: string): Promise<RecommendationDraft> {
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+// ── Один вызов модели ───────────────────────────────────────────────
+
+const MAX_TOKENS = 1500;
+const TELEGRAM_MESSAGE_LIMIT = 4096;
+
+const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+
+// Повторы при 429, 5xx и overloaded делает сам SDK (maxRetries по
+// умолчанию 2) — своего цикла повторов здесь нет.
+async function callModel(
+  step: "analysis" | "writer",
+  model: string,
+  system: string,
+  userText: string,
+  sessionId: string
+): Promise<{ text: string; usage: ApiCallUsage }> {
+  const startedAt = Date.now();
 
   const response = await client.messages.create({
-    model: "claude-opus-5",
-    max_tokens: 16000,
-    thinking: { type: "adaptive" },
-    system: SYSTEM_PROMPT,
-    messages: [{ role: "user", content: `Вот заполненная анкета:\n\n${prepText}` }],
-    output_config: { format: { type: "json_schema", schema: OUTPUT_SCHEMA } },
+    model,
+    max_tokens: MAX_TOKENS,
+    // Без extended thinking: на Opus 5 оно включено по умолчанию, поэтому
+    // выключаем явно. Иначе размышления съедят лимит в 1500 токенов.
+    thinking: { type: "disabled" },
+    system,
+    messages: [{ role: "user", content: userText }],
   });
 
+  const counters: UsageCounters = {
+    inputTokens: response.usage.input_tokens ?? 0,
+    outputTokens: response.usage.output_tokens ?? 0,
+    cacheCreationTokens: response.usage.cache_creation_input_tokens ?? 0,
+    cacheReadTokens: response.usage.cache_read_input_tokens ?? 0,
+  };
+
+  const usage: ApiCallUsage = {
+    step,
+    model,
+    sessionId,
+    ...counters,
+    durationMs: Date.now() - startedAt,
+    stopReason: response.stop_reason,
+    costUsd: computeCostUsd(model, counters),
+  };
+
+  // Одна строка JSON на вызов — чтобы находить её в логах хостинга поиском
+  // по [claude-usage] и выгружать для сравнения моделей.
+  console.log(`[claude-usage] ${JSON.stringify(usage)}`);
+
   if (response.stop_reason === "refusal") {
-    throw new Error("Модель отказалась отвечать на эту анкету.");
+    throw new Error(`Шаг «${step}»: модель отказалась отвечать.`);
   }
-
-  // Ответ упёрся в лимит и обрезан на середине — разбирать его бессмысленно,
-  // а без этой проверки поломка выглядела бы как ошибка формата.
   if (response.stop_reason === "max_tokens") {
-    throw new Error("Ответ модели не поместился в лимит и оборвался. Нужно поднять max_tokens в src/claudeApi.ts.");
+    throw new Error(
+      `Шаг «${step}»: ответ не поместился в ${MAX_TOKENS} токенов и оборвался. Нужно поднять MAX_TOKENS в src/claudeApi.ts.`
+    );
   }
 
-  // В ответе кроме текста могут быть блоки размышлений — берём только текст.
   const text = response.content
     .filter((block): block is Anthropic.TextBlock => block.type === "text")
     .map((block) => block.text)
     .join("\n")
     .trim();
 
-  if (!text) {
-    throw new Error("Модель вернула ответ без текста.");
+  if (!text) throw new Error(`Шаг «${step}»: модель вернула ответ без текста.`);
+
+  return { text, usage };
+}
+
+// ── Шаг 1: анализ ───────────────────────────────────────────────────
+
+// Красный флаг описан в методологии как единственная строка ответа.
+const RED_FLAG_MARKER = "ФЛАГИ: КРАСНЫЙ";
+
+// Минимальный признак, что перед нами блок ВЫВОДЫ, а не что-то иное.
+const REQUIRED_ANALYSIS_FIELDS = ["ВОЗРАСТ:", "ФАКТЫ", "ГИПОТЕЗЫ"];
+
+function missingAnalysisFields(analysis: string): string[] {
+  return REQUIRED_ANALYSIS_FIELDS.filter((field) => !analysis.includes(field));
+}
+
+// ── Шаг 2: письмо ───────────────────────────────────────────────────
+
+const MARKER_1 = "===СООБЩЕНИЕ 1===";
+const MARKER_2 = "===СООБЩЕНИЕ 2===";
+
+// Разметка, которую Telegram не покажет как разметку: в тексте для
+// родителя она выглядит мусором. Не повод не отправлять, но админу
+// об этом сообщаем.
+const MARKDOWN_HINTS = ["**", "##", "`"];
+// Выключенное thinking на Opus 5 изредка протекает тегом в видимый текст.
+const LEAK_HINTS = ["<thinking", "</thinking"];
+
+function splitByMarkers(text: string): { message1: string; message2: string } {
+  const start1 = text.indexOf(MARKER_1);
+  const start2 = text.indexOf(MARKER_2);
+  if (start1 === -1 || start2 === -1 || start2 < start1) {
+    throw new Error(
+      `Шаг «writer»: в ответе нет обоих маркеров. Начало ответа: ${text.slice(0, 200)}`
+    );
   }
 
-  let parsed: unknown;
+  const message1 = text.slice(start1 + MARKER_1.length, start2).trim();
+  const message2 = text.slice(start2 + MARKER_2.length).trim();
+
+  if (!message1 || !message2) {
+    throw new Error("Шаг «writer»: один из текстов между маркерами пустой.");
+  }
+  for (const [label, body] of [
+    ["первое", message1],
+    ["второе", message2],
+  ] as const) {
+    if (body.length > TELEGRAM_MESSAGE_LIMIT) {
+      throw new Error(
+        `Шаг «writer»: ${label} сообщение длиннее ${TELEGRAM_MESSAGE_LIMIT} символов (${body.length}) — Telegram его не примет.`
+      );
+    }
+  }
+
+  return { message1, message2 };
+}
+
+function collectWarnings(message1: string, message2: string): string[] {
+  const warnings: string[] = [];
+  for (const [label, body] of [
+    ["сообщении 1", message1],
+    ["сообщении 2", message2],
+  ] as const) {
+    const markdown = MARKDOWN_HINTS.filter((hint) => body.includes(hint));
+    if (markdown.length) {
+      warnings.push(`в ${label} осталась разметка: ${markdown.join(" ")}`);
+    }
+    if (LEAK_HINTS.some((hint) => body.includes(hint))) {
+      warnings.push(`в ${label} протёк служебный тег размышлений`);
+    }
+  }
+  return warnings;
+}
+
+// ── Сборка ──────────────────────────────────────────────────────────
+
+// Один повтор на шаг: модель иногда промахивается мимо формата, и второй
+// заход обычно попадает. Повторяем ровно тот шаг, который не удался.
+async function withOneRetry<T>(attempt: () => Promise<T>): Promise<T> {
   try {
-    parsed = JSON.parse(stripCodeFence(text));
-  } catch {
-    throw new Error(`Ответ модели не разобрался как JSON. Начало ответа: ${text.slice(0, 200)}`);
+    return await attempt();
+  } catch (firstError) {
+    console.error("Первая попытка не удалась, повторяю:", firstError);
+    return attempt();
+  }
+}
+
+// Бросает понятную ошибку на любой нештатной ситуации: вызывающий код
+// её ловит, пишет админу и предлагает собрать разбор вручную. Ронять
+// бота нельзя — пользователь свою анкету уже сдал.
+export async function generateRecommendationDraft(
+  prepText: string,
+  sessionId: string
+): Promise<RecommendationDraft> {
+  const usage: ApiCallUsage[] = [];
+
+  const analysisResult = await withOneRetry(async () => {
+    const result = await callModel(
+      "analysis",
+      env.ANALYSIS_MODEL,
+      METHODOLOGY_ANALYSIS,
+      `Вот заполненная анкета:\n\n${prepText}`,
+      sessionId
+    );
+    usage.push(result.usage);
+
+    // Красный флаг проверяем до разбора полей: в таком ответе методология
+    // требует только одну строку, остальных полей там и не должно быть.
+    if (result.text.includes(RED_FLAG_MARKER)) return result;
+
+    const missing = missingAnalysisFields(result.text);
+    if (missing.length) {
+      throw new Error(
+        `Шаг «analysis»: в ответе нет полей ${missing.join(", ")}. Начало ответа: ${result.text.slice(0, 200)}`
+      );
+    }
+    return result;
+  });
+
+  if (analysisResult.text.includes(RED_FLAG_MARKER)) {
+    throw new RedFlagError(analysisResult.text);
   }
 
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("Модель вернула не JSON-объект.");
-  }
+  const writerResult = await withOneRetry(async () => {
+    const result = await callModel(
+      "writer",
+      env.WRITER_MODEL,
+      VOICE_PROMPT,
+      analysisResult.text,
+      sessionId
+    );
+    usage.push(result.usage);
+    return { ...result, ...splitByMarkers(result.text) };
+  });
 
-  const draft = parsed as Record<string, unknown>;
   return {
-    message1: requireMessage(draft.message1, "message1"),
-    message2: requireMessage(draft.message2, "message2"),
+    analysis: analysisResult.text,
+    message1: writerResult.message1,
+    message2: writerResult.message2,
+    usage,
+    warnings: collectWarnings(writerResult.message1, writerResult.message2),
   };
+}
+
+// Короткая строка для сообщения админу: сколько стоил этот разбор.
+export function formatUsageLine(usage: ApiCallUsage[]): string {
+  const parts = usage.map(
+    (u) => `${u.step} ${u.inputTokens}→${u.outputTokens} (${formatUsd(u.costUsd)})`
+  );
+  const total = usage.reduce((sum, u) => sum + (u.costUsd ?? 0), 0);
+  const incomplete = usage.some((u) => u.costUsd === null) ? " и ещё, цена модели неизвестна" : "";
+  return `Токены и цена: ${parts.join(", ")}. Всего ${formatUsd(total)}${incomplete}.`;
+}
+
+export function formatUsd(value: number | null): string {
+  return value === null ? "цена неизвестна" : `$${value.toFixed(4)}`;
 }

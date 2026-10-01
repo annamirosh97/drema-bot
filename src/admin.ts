@@ -6,10 +6,61 @@ import {
   buildPrepText,
   sendApprovedRecommendation,
   generateDraftForAdmin,
+  regenerateForAdmin,
 } from "./engine";
+import { formatUsd } from "./claudeApi";
 
 function isAdmin(ctx: Context): boolean {
   return String(ctx.from?.id ?? "") === env.ADMIN_TELEGRAM_ID;
+}
+
+// Аргумент почти всех админских команд — telegram_id. null означает,
+// что его не передали или передали не число.
+function parseTelegramId(raw?: string): bigint | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+// Один разбор — это несколько вызовов подряд по одной сессии: шаг
+// «анализ», шаг «письмо» и возможные повторы. В базе они лежат
+// россыпью, поэтому собираем их обратно по сессии и близости во
+// времени. По минуте группировать нельзя: два вызова разбора легко
+// расходятся через границу минуты, и тогда один разбор посчитался бы
+// за два, а средняя цена вышла бы вдвое меньше настоящей.
+const RUN_GAP_MS = 5 * 60 * 1000;
+
+interface ApiCallRow {
+  sessionId: string;
+  createdAt: Date;
+  step: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number | null;
+}
+
+// На входе вызовы от новых к старым, на выходе — разборы в том же порядке.
+export function groupIntoRuns<T extends ApiCallRow>(callsNewestFirst: T[]): T[][] {
+  const runs: T[][] = [];
+
+  for (const call of callsNewestFirst) {
+    const current = runs[runs.length - 1];
+    const previous = current?.[current.length - 1];
+    const sameRun =
+      previous &&
+      previous.sessionId === call.sessionId &&
+      previous.createdAt.getTime() - call.createdAt.getTime() < RUN_GAP_MS;
+
+    if (sameRun) current.push(call);
+    else runs.push([call]);
+  }
+
+  return runs;
 }
 
 interface SendFlowState {
@@ -143,6 +194,75 @@ export function registerAdminCommands(bot: Bot) {
       const reason = error instanceof Error ? error.message : String(error);
       await ctx.reply(`Не получилось отправить разбор #${telegramId}.\n\nПричина: ${reason}`);
     }
+  });
+
+  // Показать блок ВЫВОДЫ — то, на чём второй шаг строил текст.
+  bot.command("analysis", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const telegramId = parseTelegramId(ctx.match?.toString());
+    if (telegramId === null) return ctx.reply("Использование: /analysis <telegram_id>");
+
+    const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+    if (!recommendation?.analysis) {
+      return ctx.reply(`Выводов анализа для #${telegramId} нет — черновик ещё не готовили.`);
+    }
+    for (let i = 0; i < recommendation.analysis.length; i += 3500) {
+      await ctx.reply(recommendation.analysis.slice(i, i + 3500));
+    }
+  });
+
+  // Пробный прогон обоих шагов для отладки промптов. Сохранённый
+  // черновик не трогает и пользователю ничего не отправляет.
+  bot.command("regen", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const telegramId = parseTelegramId(ctx.match?.toString());
+    if (telegramId === null) return ctx.reply("Использование: /regen <telegram_id>");
+
+    const answers = await prisma.answer.count({ where: { telegramId } });
+    if (!answers) return ctx.reply(`У #${telegramId} нет сохранённых ответов — прогонять нечего.`);
+
+    // Не ждём результата: бот обрабатывает сообщения по одному, и ожидание
+    // двух вызовов модели заморозило бы его для остальных.
+    void regenerateForAdmin(bot.api, telegramId);
+  });
+
+  // Во что обходятся разборы: по последним 20 прогонам.
+  bot.command("cost", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+
+    const calls = await prisma.apiCall.findMany({ orderBy: { createdAt: "desc" }, take: 200 });
+    if (!calls.length) {
+      return ctx.reply(
+        "Обращений к Claude API ещё не было — считать нечего.\n\n" +
+          "Записи появятся после первого разбора: автоматического после анкеты либо /draft и /regen."
+      );
+    }
+
+    const runs = groupIntoRuns(calls).slice(0, 20);
+    const callsInRuns = runs.flat();
+
+    const totals = runs.map((run) => run.reduce((sum, c) => sum + (c.costUsd ?? 0), 0));
+    const average = totals.reduce((a, b) => a + b, 0) / totals.length;
+
+    const perStep = (step: string) => {
+      const stepCalls = callsInRuns.filter((c) => c.step === step);
+      if (!stepCalls.length) return `${step}: вызовов нет`;
+      const avgIn = Math.round(stepCalls.reduce((s, c) => s + c.inputTokens, 0) / stepCalls.length);
+      const avgOut = Math.round(stepCalls.reduce((s, c) => s + c.outputTokens, 0) / stepCalls.length);
+      const models = [...new Set(stepCalls.map((c) => c.model))].join(", ");
+      return `${step} (${models}): в среднем ${avgIn} вход / ${avgOut} выход`;
+    };
+
+    const unpriced = callsInRuns.some((c) => c.costUsd === null)
+      ? "\n\n⚠️ У части вызовов цена неизвестна — модели нет в таблице цен в src/claudeApi.ts."
+      : "";
+
+    await ctx.reply(
+      `Последние ${runs.length} разборов (всего вызовов ${callsInRuns.length}):\n\n` +
+        `Средняя цена разбора: ${formatUsd(average)}\n` +
+        `Самый дорогой: ${formatUsd(Math.max(...totals))}\n\n` +
+        `${perStep("analysis")}\n${perStep("writer")}${unpriced}`
+    );
   });
 
   bot.command("stats", async (ctx) => {
