@@ -10,6 +10,7 @@ import {
   keepLastRegen,
 } from "./engine";
 import { formatUsd } from "./claudeApi";
+import { orderUrl } from "./web/server";
 
 function isAdmin(ctx: Context): boolean {
   return String(ctx.from?.id ?? "") === env.ADMIN_TELEGRAM_ID;
@@ -245,6 +246,26 @@ export function registerAdminCommands(bot: Bot) {
     await ctx.reply(
       `Готово: проба стала черновиком для #${telegramId}.\n\nОтправить: /approve ${telegramId}`
     );
+  });
+
+  // Незакрытые заказы PDF со ссылками в админку.
+  bot.command("orders", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+
+    const orders = await prisma.order.findMany({
+      where: { status: { in: ["GENERATING", "DRAFT_READY", "FAILED"] } },
+      orderBy: { createdAt: "asc" },
+    });
+    if (!orders.length) return ctx.reply("Незакрытых заказов PDF нет.");
+
+    const lines = orders.map((order) => {
+      const hours = Math.floor((Date.now() - order.createdAt.getTime()) / 3_600_000);
+      const mark = hours >= 20 ? "🔴 " : hours >= 12 ? "🟡 " : "";
+      const link = orderUrl(order.id);
+      return `${mark}#${order.id} — ${order.status}, ждёт ${hours} ч` + (link ? `\n${link}` : "");
+    });
+
+    await ctx.reply(`Незакрытые заказы (${orders.length}):\n\n${lines.join("\n\n")}`);
   });
 
   // Во что обходятся разборы: по последним 20 прогонам.

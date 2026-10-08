@@ -3,6 +3,7 @@ import { env } from "./env";
 import { handleIncoming, handleGotoCommand, handleResetCommand } from "./engine";
 import { registerAdminCommands, handleAdminFlowMessage } from "./admin";
 import { startAdminServer } from "./web/server";
+import { startOrderReminders } from "./engine";
 
 const bot = new Bot(env.BOT_TOKEN);
 
@@ -52,6 +53,8 @@ async function main() {
   // Веб-админка живёт в этом же процессе. Если ADMIN_PASSWORD не задан,
   // сервер всё равно поднимается, но админка отвечает 503 с объяснением.
   startAdminServer(bot.api);
+  // Напоминания о заказах, которые висят дольше обещанных суток.
+  startOrderReminders(bot.api);
   await bot.start({
     onStart: (botInfo) => console.log(`Бот @${botInfo.username} запущен и слушает сообщения (long polling).`),
   });

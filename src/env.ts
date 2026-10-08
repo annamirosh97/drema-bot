@@ -39,4 +39,8 @@ export const env = {
   // Публичный адрес приложения — из него собираются ссылки на заказы,
   // которые бот присылает в Telegram. Без него ссылок просто не будет.
   PUBLIC_BASE_URL: (process.env.PUBLIC_BASE_URL ?? "").replace(/\/+$/, ""),
+  // Контакты на финальной странице PDF. Если не заданы, строки не
+  // выводятся вовсе — пустое «Почта для связи:» выглядело бы небрежно.
+  OFFER_URL: process.env.OFFER_URL ?? "",
+  CONTACT_EMAIL: process.env.CONTACT_EMAIL ?? "",
 };

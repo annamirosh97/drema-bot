@@ -69,6 +69,8 @@ export interface OrderPageData {
   relaxationMemo: string;
   savedJustNow: boolean;
   regenerating: boolean;
+  sentJustNow: boolean;
+  sendError: string;
 }
 
 function collapsible(title: string, text: string): string {
@@ -100,10 +102,29 @@ export function renderOrderPage(data: OrderPageData): string {
       ? html`<div class="banner">Правки сохранены.</div>`
       : "";
 
+  const alreadySent = data.status === "SENT";
+  const approveDisabled = !data.memoReady
+    ? 'disabled title="Памятка для этой группы не готова"'
+    : alreadySent
+      ? 'disabled title="План уже отправлен"'
+      : "";
+  const approveHint = !data.memoReady
+    ? '<span class="muted">Отправка заблокирована: памятка не готова.</span>'
+    : alreadySent
+      ? '<span class="muted">План уже отправлен родителю.</span>'
+      : '<span class="muted">Отправит PDF родителю и закроет заказ.</span>';
+
   const memoWarning = data.memoReady
     ? ""
     : html`<div class="banner warn">Памятка для группы ${data.content.relaxationGroup} не готова.
         Отправлять этот план нельзя, пока она не написана.</div>`;
+
+  const sentBanner = data.sentJustNow
+    ? html`<div class="banner">План отправлен родителю, заказ закрыт.</div>`
+    : data.sendError
+      ? html`<div class="banner warn">Отправить не удалось: ${data.sendError}
+          Статус заказа не изменился, можно попробовать ещё раз.</div>`
+      : "";
 
   const left = html`<div class="card">
       <h2>Исходные данные</h2>
@@ -140,8 +161,16 @@ export function renderOrderPage(data: OrderPageData): string {
 
       <div class="row-actions">
         <button type="submit">Сохранить</button>
-        <a class="btn secondary" href="/admin/orders/${data.id}/preview" target="_blank">Превью</a>
-        <button type="button" disabled title="Появится на следующем этапе">Одобрить и отправить</button>
+        <a class="btn secondary" href="/admin/orders/${data.id}/preview" target="_blank">Превью PDF</a>
+        <a class="btn secondary" href="/admin/orders/${data.id}/preview-html" target="_blank">Быстрое превью</a>
+      </div>
+    </form>
+
+    <form method="post" action="/admin/orders/${data.id}/approve"
+          onsubmit="return confirm('Отправить план родителю? Отменить отправку будет нельзя.')">
+      <div class="row-actions">
+        <button type="submit" ${raw(approveDisabled)}>Одобрить и отправить</button>
+        ${raw(approveHint)}
       </div>
     </form>
 
@@ -191,7 +220,7 @@ export function renderOrderPage(data: OrderPageData): string {
         ${data.hasEdits ? " · есть правки" : ""} ·
         <a href="/admin/orders">ко всем заказам</a>
       </p>
-      ${raw(banner)}${raw(memoWarning)}
+      ${raw(banner)}${raw(sentBanner)}${raw(memoWarning)}
       <div class="cols"><div>${raw(left)}</div><div>${raw(right)}</div></div>
       <script>${raw(script)}</script>`
   );

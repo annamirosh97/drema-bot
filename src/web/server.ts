@@ -12,7 +12,8 @@ import express, { NextFunction, Request, Response } from "express";
 import type { Api } from "grammy";
 import { prisma } from "../prisma";
 import { env } from "../env";
-import { buildPrepText, runPdfGeneration } from "../engine";
+import { approveAndSendPdf, buildPrepText, runPdfGeneration } from "../engine";
+import { renderPdf } from "../pdf/render";
 import { PdfContent, ScheduleRow, ScheduleVariant } from "../paidPdf";
 import { RelaxationGroup, isRelaxationMemoReady, readRelaxationMemo } from "../prompts";
 import { OrderRow, renderOrderPage, renderOrdersPage, renderPreview } from "./pages";
@@ -159,6 +160,8 @@ export function startAdminServer(api: Api) {
         relaxationMemo: readRelaxationMemo(group),
         savedJustNow: req.query.saved === "1",
         regenerating: req.query.regen === "1",
+        sentJustNow: req.query.sent === "1",
+        sendError: typeof req.query.error === "string" ? req.query.error : "",
       })
     );
   });
@@ -187,12 +190,40 @@ export function startAdminServer(api: Api) {
     res.redirect(`/admin/orders/${id}?saved=1`);
   });
 
+  // Превью — настоящий PDF, тот же рендер, что уйдёт родителю. Так
+  // видно переносы страниц и шрифты, чего HTML-превью не показывало.
+  // Дата на обложке — сегодняшняя: настоящая проставится при одобрении.
   app.get("/admin/orders/:id/preview", async (req, res) => {
     const loaded = await loadOrder(Number(req.params.id));
     if (!loaded) return res.status(404).send("Заказ не найден.");
 
     const content = currentContent(loaded.draft);
+    const group = content.relaxationGroup as RelaxationGroup;
+    const pdf = await renderPdf(content, readRelaxationMemo(group), new Date());
+    res.type("pdf").setHeader("Content-Disposition", "inline; filename=preview.pdf");
+    res.send(pdf);
+  });
+
+  // HTML-превью осталось как быстрый способ вычитать текст без ожидания
+  // рендера: PDF собирается несколько секунд.
+  app.get("/admin/orders/:id/preview-html", async (req, res) => {
+    const loaded = await loadOrder(Number(req.params.id));
+    if (!loaded) return res.status(404).send("Заказ не найден.");
+
+    const content = currentContent(loaded.draft);
     res.send(renderPreview(content, readRelaxationMemo(content.relaxationGroup as RelaxationGroup)));
+  });
+
+  app.post("/admin/orders/:id/approve", async (req, res) => {
+    const id = Number(req.params.id);
+    try {
+      await approveAndSendPdf(api, id);
+      res.redirect(`/admin/orders/${id}?sent=1`);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`Не удалось отправить план по заказу #${id}:`, error);
+      res.redirect(`/admin/orders/${id}?error=${encodeURIComponent(reason)}`);
+    }
   });
 
   app.post("/admin/orders/:id/regenerate", async (req, res) => {

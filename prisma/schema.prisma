@@ -179,6 +179,10 @@ model PdfDraft {
   writerTokensOut Int    @default(0)
   costUsd       Float?
   generationCount Int    @default(1)
+  // Готовый PDF, чтобы отправить повторно и не рендерить заново.
+  // Файл около мегабайта, заказов десятки в месяц — в базе это дешевле,
+  // чем заводить и монтировать отдельное файловое хранилище.
+  pdfBytes      Bytes?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   approvedAt    DateTime?
