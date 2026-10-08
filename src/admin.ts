@@ -8,6 +8,7 @@ import {
   generateDraftForAdmin,
   regenerateForAdmin,
   keepLastRegen,
+  sendOfferTo,
 } from "./engine";
 import { formatUsd } from "./claudeApi";
 import { orderUrl } from "./web/server";
@@ -246,6 +247,31 @@ export function registerAdminCommands(bot: Bot) {
     await ctx.reply(
       `Готово: проба стала черновиком для #${telegramId}.\n\nОтправить: /approve ${telegramId}`
     );
+  });
+
+  // Отправить оффер вручную — тому, кто его пропустил или потерял в
+  // переписке. Сессию и заказы не трогает.
+  bot.command("offer", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const telegramId = parseTelegramId(ctx.match?.toString());
+    if (telegramId === null) return ctx.reply("Использование: /offer <telegram_id>");
+
+    const session = await prisma.session.findUnique({ where: { telegramId } });
+    if (!session) return ctx.reply("Такого пользователя нет в базе.");
+
+    const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+    const warning = recommendation?.message1
+      ? ""
+      : `\n\n⚠️ У #${telegramId} нет готового разбора. Если он нажмёт «Купить», ` +
+        `план не соберётся: он строится на выводах анализа и двух отправленных сообщениях.`;
+
+    try {
+      await sendOfferTo(bot.api, telegramId, session.chatId);
+      await ctx.reply(`Оффер отправлен #${telegramId}. Сессия и заказы не менялись.${warning}`);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await ctx.reply(`Не получилось отправить оффер #${telegramId}.\n\nПричина: ${reason}`);
+    }
   });
 
   // Незакрытые заказы PDF со ссылками в админку.

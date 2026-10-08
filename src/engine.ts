@@ -85,6 +85,15 @@ export async function handleIncoming(ctx: Context) {
     await ctx.answerCallbackQuery().catch(() => {});
   }
 
+  // Кнопки оффера разбираем до стадий. Оффер мог быть отправлен вручную
+  // командой /offer, когда пользователь уже ушёл дальше по сценарию, и
+  // тогда его стадия с оффером не совпадёт, а кнопки окажутся мёртвыми.
+  // Та же защита срабатывает, если человек пролистал чат наверх и нажал
+  // кнопку под старым сообщением.
+  if (callbackData?.startsWith("offer_")) {
+    return handleOffer(ctx, session, callbackData);
+  }
+
   switch (session.stage) {
     case "WELCOME":
       return handleWelcome(ctx, session, callbackData);
@@ -912,6 +921,18 @@ async function sendExamplePdf(ctx: Context) {
   if (fileId) exampleCache = { fileId, hash };
 
   return exampleFollowUp(ctx);
+}
+
+// Отправляет оффер вручную, командой /offer. Ни стадию сессии, ни
+// заказы не трогает: это просто повторный показ предложения тому, кто
+// его пропустил или потерял в переписке. Показ при этом попадает в
+// статистику, иначе покупка по такому офферу выглядела бы в /stats
+// покупкой без показа.
+export async function sendOfferTo(api: Api, telegramId: bigint, chatId: bigint) {
+  await logOfferEvent(telegramId, "offer_shown");
+  await api.sendMessage(Number(chatId), texts.paidOffer, {
+    reply_markup: offerKeyboard(env.PDF_PRICE_RUB),
+  });
 }
 
 async function handleOffer(ctx: Context, session: Session, callbackData?: string) {
