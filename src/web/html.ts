@@ -92,6 +92,13 @@ const STYLES = `
   .pill.warn { background: var(--warn); }
   .pill.danger { background: var(--danger); color: #fff; }
   .schedule-row { display: grid; grid-template-columns: 90px 1fr 110px 32px; gap: 8px; margin-bottom: 6px; }
+  /* Фиксированный блок под таблицей режима. Оформление как .sdisc в
+     прототипе PDF: мелкий приглушённый текст на кремовом фоне. */
+  .sdisc {
+    margin-top: 14px; padding: 12px 16px; border-radius: 8px;
+    background: var(--bg); border: 1px solid #efe6d6;
+    font-size: 13px; line-height: 1.5; color: var(--muted);
+  }
   .banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; background: #e8f3e8; }
   .banner.warn { background: #FFF6E6; }
 `;

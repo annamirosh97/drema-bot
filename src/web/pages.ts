@@ -2,6 +2,7 @@
 // Данные сюда приходят уже собранными, обращений к базе здесь нет.
 
 import { PdfContent, ScheduleVariant } from "../paidPdf";
+import { SCHEDULE_DISCLAIMER } from "../pdfTexts";
 import { escape, html, page, raw } from "./html";
 
 export interface OrderRow {
@@ -228,6 +229,7 @@ export function renderPreview(content: PdfContent, memo: string): string {
         <h2>Часть 2. Примерный режим дня</h2>
         <p>${content.schedule.intro}</p>
         ${raw(variants.join(""))}
+        <div class="sdisc">${SCHEDULE_DISCLAIMER}</div>
         <p style="margin-top:16px"><strong>Как прийти к этому режиму.</strong> ${content.schedule.note}</p>
       </div>
 
