@@ -30,4 +30,13 @@ export const env = {
   // Разделены, чтобы сравнивать качество и цену по шагам, не трогая код.
   PDF_PLAN_MODEL: process.env.PDF_PLAN_MODEL || "claude-opus-5",
   PDF_WRITER_MODEL: process.env.PDF_WRITER_MODEL || "claude-opus-5",
+  // Пароль к веб-админке, где проверяются черновики PDF. Если не задан,
+  // админка не поднимается, а бот работает как обычно — чтобы деплой до
+  // того, как переменная прописана, не ронял бота целиком.
+  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD ?? "",
+  // Порт веб-админки. На Railway подставляется автоматически.
+  PORT: parseInt(process.env.PORT ?? "3000", 10) || 3000,
+  // Публичный адрес приложения — из него собираются ссылки на заказы,
+  // которые бот присылает в Telegram. Без него ссылок просто не будет.
+  PUBLIC_BASE_URL: (process.env.PUBLIC_BASE_URL ?? "").replace(/\/+$/, ""),
 };

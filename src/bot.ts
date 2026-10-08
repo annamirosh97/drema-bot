@@ -2,6 +2,7 @@ import { Bot, Context } from "grammy";
 import { env } from "./env";
 import { handleIncoming, handleGotoCommand, handleResetCommand } from "./engine";
 import { registerAdminCommands, handleAdminFlowMessage } from "./admin";
+import { startAdminServer } from "./web/server";
 
 const bot = new Bot(env.BOT_TOKEN);
 
@@ -48,6 +49,9 @@ bot.catch((err) => {
 
 async function main() {
   console.log("Дрёма-бот запускается...");
+  // Веб-админка живёт в этом же процессе. Если ADMIN_PASSWORD не задан,
+  // она просто не поднимется — бот от этого не пострадает.
+  startAdminServer(bot.api);
   await bot.start({
     onStart: (botInfo) => console.log(`Бот @${botInfo.username} запущен и слушает сообщения (long polling).`),
   });

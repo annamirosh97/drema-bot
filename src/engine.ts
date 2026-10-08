@@ -10,6 +10,7 @@ import {
 } from "./claudeApi";
 import { PaidRedFlagError, generatePdfDraft } from "./paidPdf";
 import { PROJECT_ROOT } from "./prompts";
+import { orderUrl } from "./web/server";
 import { QUESTIONS, QuestionDef, getFirstQuestionNumber, getNextQuestionNumber, getQuestion } from "./questions";
 import { InputFile } from "grammy";
 import { join } from "path";
@@ -1006,11 +1007,12 @@ export async function runPdfGeneration(api: Api, orderId: number, reviewerCommen
     const memoWarning = draft.memoReady
       ? ""
       : `\n⚠️ Памятка для группы ${draft.content.relaxationGroup} не готова — отправлять нельзя.`;
+    const link = orderUrl(orderId);
     await api.sendMessage(
       adminChatId,
       `📝 Черновик PDF #${orderId} готов (пользователь #${order.telegramId}).\n` +
         `${formatUsageLine(draft.usage)}${memoWarning}\n\n` +
-        `Страница заказа в админке появится на следующем этапе.`
+        (link ? `Проверить и отправить: ${link}` : "Ссылка на заказ появится, когда будет задан PUBLIC_BASE_URL.")
     );
   } catch (error) {
     const redFlag = error instanceof PaidRedFlagError;
@@ -1030,7 +1032,8 @@ export async function runPdfGeneration(api: Api, orderId: number, reviewerCommen
       .sendMessage(
         adminChatId,
         `❌ Заказ PDF #${orderId} (пользователь #${order.telegramId}) не собрался.\n\n` +
-          `Причина: ${reason}\n\nПользователю ничего не отправлено, он ждёт.`
+          `Причина: ${reason}\n\nПользователю ничего не отправлено, он ждёт.` +
+          (orderUrl(orderId) ? `\n\nЗаказ: ${orderUrl(orderId)}` : "")
       )
       .catch((sendError) => console.error("И сообщить об этом не вышло:", sendError));
   }
