@@ -102,8 +102,32 @@ function requireSections(sections: Record<string, string>, required: string[], s
 
 // ── Разбор режима дня ───────────────────────────────────────────────
 
-// Строка режима: «ЧЧ:ММ — событие» или «ЧЧ:ММ — событие, длительность».
-const SCHEDULE_ROW = /^(\d{1,2}:\d{2})\s*[—–-]\s*(.+)$/;
+const SCHEDULE_TIME = /^\d{1,2}:\d{2}$/;
+// Прежний формат строки: «ЧЧ:ММ — событие». Поддерживаем на случай, если
+// модель собьётся на старый шаблон. Длительности в нём нет: по запятой
+// не делим, потому что в названии события запятая законна.
+const LEGACY_ROW = /^(\d{1,2}:\d{2})\s*[—–-]\s*(.+)$/;
+
+// Строка режима: «ЧЧ:ММ | событие | длительность». Третье поле пустое у
+// всего, кроме дневных снов, но разделитель всё равно стоит:
+// «08:00 | Подъём |». null означает, что строку разобрать не вышло —
+// вызывающий код не выбрасывает её, а кладёт в заметки для проверки.
+function parseScheduleLine(line: string): ScheduleRow | null {
+  if (line.includes("|")) {
+    const parts = line.split("|").map((part) => part.trim());
+    // Ровно два или три поля. Больше — значит разделителей лишних, и
+    // угадывать, где там что, опаснее, чем отдать строку на проверку.
+    if (parts.length < 2 || parts.length > 3) return null;
+
+    const [time, event, duration = ""] = parts;
+    if (!SCHEDULE_TIME.test(time) || !event) return null;
+    return { time, event, duration };
+  }
+
+  const legacy = line.match(LEGACY_ROW);
+  if (!legacy) return null;
+  return { time: legacy[1], event: legacy[2].trim(), duration: "" };
+}
 
 interface ParsedSchedule {
   variants: ScheduleVariant[];
@@ -129,8 +153,8 @@ function parseSchedule(block: string): ParsedSchedule {
       continue;
     }
 
-    const match = line.match(SCHEDULE_ROW);
-    if (!match) {
+    const row = parseScheduleLine(line);
+    if (!row) {
       notes.push(`не разобрано: ${line}`);
       continue;
     }
@@ -138,17 +162,7 @@ function parseSchedule(block: string): ParsedSchedule {
     // Единственный вариант без заголовка — заведём его сами, иначе
     // строки будет некуда класть.
     if (!variants.length) variants.push({ title: "Режим дня", rows: [] });
-
-    // Длительность, если есть, отделена последней запятой.
-    const rest = match[2].trim();
-    const comma = rest.lastIndexOf(",");
-    const hasDuration = comma !== -1 && /\d/.test(rest.slice(comma + 1));
-
-    variants[variants.length - 1].rows.push({
-      time: match[1],
-      event: (hasDuration ? rest.slice(0, comma) : rest).trim(),
-      duration: hasDuration ? rest.slice(comma + 1).trim() : "",
-    });
+    variants[variants.length - 1].rows.push(row);
   }
 
   return { variants, notes };
