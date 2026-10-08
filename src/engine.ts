@@ -582,16 +582,39 @@ export async function generateDraftForAdmin(api: Api, telegramId: bigint) {
   }
 }
 
+// Последний пробный прогон /regen по каждому пользователю. В базу он не
+// пишется специально: /regen — это проба промптов, и перезаписывать ею
+// готовый к отправке черновик нельзя. Но и терять удачный вариант
+// обидно, поэтому держим его здесь до команды /keep.
+//
+// В памяти процесса, а не в базе: живёт минуты, до перезапуска, и
+// предназначен одному человеку.
+const lastRegen = new Map<string, { analysis: string; message1: string; message2: string }>();
+
+// Сохранить последний пробный прогон как черновик — то, что отправит
+// /approve. Возвращает false, если пробы не было или процесс успел
+// перезапуститься.
+export async function keepLastRegen(telegramId: bigint): Promise<boolean> {
+  const draft = lastRegen.get(String(telegramId));
+  if (!draft) return false;
+
+  await prisma.recommendation.update({
+    where: { telegramId },
+    data: { analysis: draft.analysis, message1: draft.message1, message2: draft.message2 },
+  });
+  lastRegen.delete(String(telegramId));
+  return true;
+}
+
 // Отладочный прогон для /regen: оба шага по сохранённым ответам анкеты.
 // Присылает админу блок ВЫВОДЫ, оба сообщения и строку с ценой.
-// Черновик в базе НЕ трогает — это проба промптов, а не новая версия
-// разбора; результат нужно смотреть глазами и при желании повторить
-// обычным /draft.
+// Черновик в базе НЕ трогает — результат придерживается в памяти, и
+// попадёт в черновик только по команде /keep.
 export async function regenerateForAdmin(api: Api, telegramId: bigint) {
   const adminChatId = Number(env.ADMIN_TELEGRAM_ID);
 
   try {
-    await api.sendMessage(adminChatId, `Пробный прогон для #${telegramId}. Черновик не перезапишу.`);
+    await api.sendMessage(adminChatId, `Пробный прогон для #${telegramId}. Черновик пока не перезапишу.`);
 
     const draft = await generateRecommendationDraft(await buildPrepText(telegramId), String(telegramId));
     await recordApiCalls(draft.usage);
@@ -600,13 +623,22 @@ export async function regenerateForAdmin(api: Api, telegramId: bigint) {
     await sendLongMessage(api, BigInt(adminChatId), formatDraftMessage(texts.draftHeading1, draft.message1), true);
     await sendLongMessage(api, BigInt(adminChatId), formatDraftMessage(texts.draftHeading2, draft.message2), true);
 
+    lastRegen.set(String(telegramId), {
+      analysis: draft.analysis,
+      message1: draft.message1,
+      message2: draft.message2,
+    });
+
     const warningLine = draft.warnings.length ? `\n⚠️ ${draft.warnings.join("; ")}` : "";
     await api.sendMessage(
       adminChatId,
-      `${formatUsageLine(draft.usage)}${warningLine}\n\nЭто проба: сохранённый черновик не изменился.`
+      `${formatUsageLine(draft.usage)}${warningLine}\n\n` +
+        `⚠️ Это проба, в черновик она пока не попала. Сейчас /approve ${telegramId} отправит ПРЕДЫДУЩУЮ версию.\n\n` +
+        `Сохранить этот вариант как черновик: /keep ${telegramId}`
     );
   } catch (error) {
     if (error instanceof RedFlagError) {
+      lastRegen.delete(String(telegramId));
       await api
         .sendMessage(adminChatId, `Пробный прогон #${telegramId}: красный флаг.\n\n${error.analysis}`)
         .catch((sendError) => console.error("И сообщить об этом не вышло:", sendError));

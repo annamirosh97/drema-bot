@@ -7,6 +7,7 @@ import {
   sendApprovedRecommendation,
   generateDraftForAdmin,
   regenerateForAdmin,
+  keepLastRegen,
 } from "./engine";
 import { formatUsd } from "./claudeApi";
 
@@ -224,6 +225,26 @@ export function registerAdminCommands(bot: Bot) {
     // Не ждём результата: бот обрабатывает сообщения по одному, и ожидание
     // двух вызовов модели заморозило бы его для остальных.
     void regenerateForAdmin(bot.api, telegramId);
+  });
+
+  // Сохранить последний пробный прогон /regen как черновик. Без этого
+  // /approve отправит ту версию, что лежала в базе до пробы.
+  bot.command("keep", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const telegramId = parseTelegramId(ctx.match?.toString());
+    if (telegramId === null) return ctx.reply("Использование: /keep <telegram_id>");
+
+    const saved = await keepLastRegen(telegramId);
+    if (!saved) {
+      return ctx.reply(
+        `Сохранять нечего: пробного прогона для #${telegramId} в памяти нет.\n\n` +
+          `Он теряется при перезапуске бота. Сделай /regen ${telegramId} заново, ` +
+          `либо /draft ${telegramId} — тот сразу пишет в черновик.`
+      );
+    }
+    await ctx.reply(
+      `Готово: проба стала черновиком для #${telegramId}.\n\nОтправить: /approve ${telegramId}`
+    );
   });
 
   // Во что обходятся разборы: по последним 20 прогонам.

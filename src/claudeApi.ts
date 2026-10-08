@@ -184,6 +184,19 @@ const MARKDOWN_HINTS = ["**", "##", "`"];
 // Выключенное thinking на Opus 5 изредка протекает тегом в видимый текст.
 const LEAK_HINTS = ["<thinking", "</thinking"];
 
+// Авторские тире — то, что промпт шага 2 запрещает, а модель всё равно
+// ставит. Полностью их отловить нельзя: отличить «Ритуал — это…» (можно)
+// от «вечер длиннее — и это заметно» (нельзя) без разбора грамматики не
+// получится. Поэтому ловим только заведомо лишние: тире перед союзом,
+// то есть ровно вместо запятой. Остальное видно по счётчику.
+const AUTHORIAL_DASH = /—\s+(и|но|а|однако|зато|поэтому|потому что|хотя)[\s,]/g;
+
+function countDashes(text: string): number {
+  // Только настоящее тире. Диапазоны чисел пишутся коротким знаком
+  // «15–20» и правилом разрешены, их не считаем.
+  return (text.match(/—/g) ?? []).length;
+}
+
 function splitByMarkers(text: string): { message1: string; message2: string } {
   const start1 = text.indexOf(MARKER_1);
   const start2 = text.indexOf(MARKER_2);
@@ -225,6 +238,18 @@ function collectWarnings(message1: string, message2: string): string[] {
     }
     if (LEAK_HINTS.some((hint) => body.includes(hint))) {
       warnings.push(`в ${label} протёк служебный тег размышлений`);
+    }
+
+    const beforeConjunction = body.match(AUTHORIAL_DASH) ?? [];
+    if (beforeConjunction.length) {
+      warnings.push(
+        `в ${label} тире вместо запятой (${beforeConjunction.length}): ` +
+          beforeConjunction.map((m) => `«${m.trim()}…»`).join(", ")
+      );
+    }
+    const dashes = countDashes(body);
+    if (dashes > 4) {
+      warnings.push(`в ${label} всего тире: ${dashes} — стоит пробежать глазами`);
     }
   }
   return warnings;
