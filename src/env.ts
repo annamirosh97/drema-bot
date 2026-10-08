@@ -24,8 +24,10 @@ export const env = {
   // умолчанию — та модель, что стояла до разделения на шаги.
   ANALYSIS_MODEL: process.env.ANALYSIS_MODEL || "claude-opus-5",
   WRITER_MODEL: process.env.WRITER_MODEL || "claude-opus-5",
-  // Цена платного продукта на экране оплаты, в рублях. Одна для всех:
-  // раньше здесь был список цен, из которого каждому доставалась
-  // случайная, — от этого отказались.
-  PRODUCT_PRICE_RUB: parseInt(process.env.PRODUCT_PRICE_RUB ?? "990", 10) || 990,
+  // Цена платного PDF, в рублях. Одна для всех.
+  PDF_PRICE_RUB: parseInt(process.env.PDF_PRICE_RUB ?? "990", 10) || 990,
+  // Модели двух шагов генерации платного PDF: P1 «План» и P2 «Текст».
+  // Разделены, чтобы сравнивать качество и цену по шагам, не трогая код.
+  PDF_PLAN_MODEL: process.env.PDF_PLAN_MODEL || "claude-opus-5",
+  PDF_WRITER_MODEL: process.env.PDF_WRITER_MODEL || "claude-opus-5",
 };

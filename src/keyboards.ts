@@ -47,9 +47,17 @@ export function csatKeyboard(): InlineKeyboard {
   return kb;
 }
 
-export function fakeDoorKeyboard(price: number): InlineKeyboard {
+// Оффер платного PDF после двух бесплатных сообщений.
+export function offerKeyboard(price: number): InlineKeyboard {
   return new InlineKeyboard()
-    .text(`Купить за ${price} ₽`, "fakedoor_pay")
+    .text(`Купить за ${price} ₽`, "offer_buy")
     .row()
-    .text("Не сейчас", "fakedoor_skip");
+    .text("Посмотреть пример PDF", "offer_example")
+    .row()
+    .text("Спасибо, не нужно", "offer_decline");
+}
+
+// Сообщение вслед за примером PDF: только кнопка покупки.
+export function exampleFollowupKeyboard(price: number): InlineKeyboard {
+  return new InlineKeyboard().text(`Купить за ${price} ₽`, "offer_buy");
 }

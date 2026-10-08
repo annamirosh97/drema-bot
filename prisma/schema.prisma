@@ -64,7 +64,8 @@ model Session {
 
   answers        Answer[]
   recommendation Recommendation?
-  fakeDoorOffer  FakeDoorOffer?
+  orders         Order[]
+  offerEvents    OfferEvent[]
 
   @@index([status])
 }
@@ -98,17 +99,6 @@ model Recommendation {
   session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
 }
 
-// Fake door тест: кому и по какой цене показали экран оплаты, кто нажал "Оплатить".
-model FakeDoorOffer {
-  id         Int       @id @default(autoincrement())
-  telegramId BigInt    @unique
-  priceRub   Int
-  shownAt    DateTime  @default(now())
-  clickedAt  DateTime? // NULL, если нажали "Не сейчас" или не нажали ничего
-
-  session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
-}
-
 // Каждое обращение к Claude API: токены, время и стоимость. Нужна, чтобы
 // сравнивать модели и видеть реальную цену разбора (см. /cost в админке).
 // Запись ведётся в try/catch — сбой логирования не должен ломать генерацию.
@@ -127,4 +117,90 @@ model ApiCall {
   createdAt           DateTime @default(now())
 
   @@index([createdAt])
+}
+
+// Платный продукт. Пока один, но enum — чтобы добавить следующий без миграции схемы кода.
+enum Product {
+  PDF
+}
+
+// PENDING_PAYMENT, PAID и REFUNDED заведены заранее: позже между «Купить» и
+// генерацией встанет оплата, и добавлять значения enum уже не придётся.
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  GENERATING
+  DRAFT_READY
+  SENT
+  FAILED
+  CANCELED
+  REFUNDED
+}
+
+// Заказ платного разбора. Создаётся по кнопке «Купить».
+model Order {
+  id         Int         @id @default(autoincrement())
+  telegramId BigInt
+  product    Product     @default(PDF)
+  priceRub   Int // цена, показанная этому пользователю на кнопке
+  status     OrderStatus @default(GENERATING)
+  createdAt  DateTime    @default(now())
+  sentAt     DateTime?
+  canceledAt DateTime?
+  failReason String? // почему FAILED: красный флаг или причина сбоя генерации
+
+  // Под будущую оплату: пока не заполняются.
+  yookassaPaymentId String?
+  paidAt            DateTime?
+  refundedAt        DateTime?
+
+  session Session   @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+  draft   PdfDraft?
+
+  @@index([telegramId])
+  @@index([status])
+}
+
+// Черновик PDF. aiContent — то, что выдала модель; после правок админа он
+// НЕ перезаписывается, правки живут отдельно в editedContent. Перезаписать
+// aiContent может только перегенерация.
+model PdfDraft {
+  id            Int      @id @default(autoincrement())
+  orderId       Int      @unique
+  aiContent     Json
+  editedContent Json?
+  rawPlan       String // полный ответ P1, как пришёл
+  reviewerNotes String   @default("")
+  planModel     String
+  writerModel   String
+  planTokensIn  Int      @default(0)
+  planTokensOut Int      @default(0)
+  writerTokensIn  Int    @default(0)
+  writerTokensOut Int    @default(0)
+  costUsd       Float?
+  generationCount Int    @default(1)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  approvedAt    DateTime?
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+// Воронка оффера: показ, клик по примеру, клик по «Купить».
+enum OfferEventType {
+  offer_shown
+  example_clicked
+  buy_clicked
+}
+
+model OfferEvent {
+  id         Int            @id @default(autoincrement())
+  telegramId BigInt
+  type       OfferEventType
+  createdAt  DateTime       @default(now())
+
+  session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+
+  @@index([telegramId])
+  @@index([type])
 }

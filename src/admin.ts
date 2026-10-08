@@ -121,7 +121,7 @@ export function registerAdminCommands(bot: Bot) {
     if (!session) return ctx.reply("Такого пользователя нет в базе.");
 
     sendFlows.set(ctx.from!.id, { telegramId, chatId: session.chatId, messages: [], stage: "collecting" });
-    await ctx.reply(`Собираю разбор для #${telegramId}. Пришли сообщение 1 из 4.\n\nОтменить в любой момент — /cancel`);
+    await ctx.reply(`Собираю разбор для #${telegramId}. Пришли сообщение 1 из 2.\n\nОтменить в любой момент — /cancel`);
   });
 
   // Переподготовить черновик для уже заполненной анкеты. Нужна, когда
@@ -267,20 +267,41 @@ export function registerAdminCommands(bot: Bot) {
 
   bot.command("stats", async (ctx) => {
     if (!isAdmin(ctx)) return;
-    const [total, completed, declined, offers, clicks] = await Promise.all([
+    const [total, completed, declined, events, orders] = await Promise.all([
       prisma.session.count(),
       prisma.session.count({ where: { status: "completed" } }),
       prisma.session.count({ where: { status: "declined" } }),
-      prisma.fakeDoorOffer.count(),
-      prisma.fakeDoorOffer.count({ where: { clickedAt: { not: null } } }),
+      prisma.offerEvent.findMany({ select: { telegramId: true, type: true } }),
+      prisma.order.groupBy({ by: ["status"], _count: true }),
     ]);
-    const rate = offers ? Math.round((clicks / offers) * 100) : 0;
+
+    // Считаем по пользователям, а не по событиям: один человек может
+    // нажать «Купить» дважды, и это всё равно одна конверсия.
+    const usersBy = (type: string) =>
+      new Set(events.filter((e) => e.type === type).map((e) => String(e.telegramId)));
+    const shown = usersBy("offer_shown");
+    const sawExample = usersBy("example_clicked");
+    const bought = usersBy("buy_clicked");
+
+    const pct = (part: number, whole: number) => (whole ? `${Math.round((part / whole) * 100)}%` : "—");
+    const boughtAfterExample = [...bought].filter((id) => sawExample.has(id)).length;
+    const withoutExample = [...shown].filter((id) => !sawExample.has(id));
+    const boughtWithoutExample = [...bought].filter((id) => !sawExample.has(id)).length;
+
+    const byStatus = orders
+      .map((row) => `  ${row.status}: ${row._count}`)
+      .join("\n") || "  заказов пока нет";
+
     await ctx.reply(
       `Всего пользователей: ${total}\n` +
         `Завершили анкету: ${completed}\n` +
         `Отказались: ${declined}\n\n` +
-        `Fake door — показано экранов: ${offers}\n` +
-        `Нажали «Оплатить»: ${clicks} (${rate}%)`
+        `Оффер показан: ${shown.size}\n` +
+        `Смотрели пример: ${sawExample.size} (${pct(sawExample.size, shown.size)})\n` +
+        `Нажали «Купить»: ${bought.size} (${pct(bought.size, shown.size)})\n\n` +
+        `Из тех, кто смотрел пример: ${boughtAfterExample} из ${sawExample.size} (${pct(boughtAfterExample, sawExample.size)})\n` +
+        `Из тех, кто не смотрел: ${boughtWithoutExample} из ${withoutExample.length} (${pct(boughtWithoutExample, withoutExample.length)})\n\n` +
+        `Заказы PDF:\n${byStatus}`
     );
   });
 }
@@ -305,8 +326,8 @@ export async function handleAdminFlowMessage(bot: Bot, ctx: Context): Promise<bo
   if (flow.stage === "confirming") {
     if (text === "/confirm") {
       sendFlows.delete(adminId);
-      await deliverRecommendation(bot.api, flow.telegramId, flow.chatId, flow.messages as [string, string, string, string]);
-      await ctx.reply("Готово — отправила 4 сообщения и показала пользователю экран оплаты (fake door).");
+      await deliverRecommendation(bot.api, flow.telegramId, flow.chatId, flow.messages as [string, string]);
+      await ctx.reply("Готово: разбор отправлен двумя сообщениями, следом показан оффер.");
     } else {
       await ctx.reply("Напиши /confirm, чтобы отправить как есть, или /cancel, чтобы отменить.");
     }
@@ -319,8 +340,8 @@ export async function handleAdminFlowMessage(bot: Bot, ctx: Context): Promise<bo
   }
 
   flow.messages.push(text);
-  if (flow.messages.length < 4) {
-    await ctx.reply(`Принято. Пришли сообщение ${flow.messages.length + 1} из 4.`);
+  if (flow.messages.length < 2) {
+    await ctx.reply(`Принято. Пришли сообщение ${flow.messages.length + 1} из 2.`);
   } else {
     flow.stage = "confirming";
     const preview = flow.messages.map((m, i) => `— Сообщение ${i + 1} —\n${m}`).join("\n\n");

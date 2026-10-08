@@ -50,8 +50,11 @@ interface UsageCounters {
   cacheReadTokens: number;
 }
 
+// Шаги бесплатной части (analysis, writer) и платной (pdf_plan, pdf_writer).
+export type ApiStep = "analysis" | "writer" | "pdf_plan" | "pdf_writer";
+
 export interface ApiCallUsage extends UsageCounters {
-  step: "analysis" | "writer";
+  step: ApiStep;
   model: string;
   sessionId: string;
   durationMs: number;
@@ -85,20 +88,32 @@ const TELEGRAM_MESSAGE_LIMIT = 4096;
 
 const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
-// Повторы при 429, 5xx и overloaded делает сам SDK (maxRetries по
-// умолчанию 2) — своего цикла повторов здесь нет.
-async function callModel(
-  step: "analysis" | "writer",
-  model: string,
-  system: string,
-  userText: string,
-  sessionId: string
-): Promise<{ text: string; usage: ApiCallUsage }> {
+export interface ClaudeCallOptions {
+  step: ApiStep;
+  model: string;
+  system: string;
+  userText: string;
+  sessionId: string;
+  maxTokens?: number;
+}
+
+// Единственное место, где бот обращается к модели. Повторы при 429, 5xx
+// и overloaded делает сам SDK (maxRetries по умолчанию 2) — своего цикла
+// повторов здесь нет. Логирование расхода тоже тут, чтобы ни один вызов
+// не прошёл мимо [claude-usage].
+export async function callClaude({
+  step,
+  model,
+  system,
+  userText,
+  sessionId,
+  maxTokens = MAX_TOKENS,
+}: ClaudeCallOptions): Promise<{ text: string; usage: ApiCallUsage }> {
   const startedAt = Date.now();
 
   const response = await client.messages.create({
     model,
-    max_tokens: MAX_TOKENS,
+    max_tokens: maxTokens,
     // Без extended thinking: на Opus 5 оно включено по умолчанию, поэтому
     // выключаем явно. Иначе размышления съедят лимит в 1500 токенов.
     thinking: { type: "disabled" },
@@ -131,9 +146,7 @@ async function callModel(
     throw new Error(`Шаг «${step}»: модель отказалась отвечать.`);
   }
   if (response.stop_reason === "max_tokens") {
-    throw new Error(
-      `Шаг «${step}»: ответ не поместился в ${MAX_TOKENS} токенов и оборвался. Нужно поднять MAX_TOKENS в src/claudeApi.ts.`
-    );
+    throw new Error(`Шаг «${step}»: ответ не поместился в ${maxTokens} токенов и оборвался.`);
   }
 
   const text = response.content
@@ -240,13 +253,13 @@ export async function generateRecommendationDraft(
   const usage: ApiCallUsage[] = [];
 
   const analysisResult = await withOneRetry(async () => {
-    const result = await callModel(
-      "analysis",
-      env.ANALYSIS_MODEL,
-      METHODOLOGY_ANALYSIS,
-      `Вот заполненная анкета:\n\n${prepText}`,
-      sessionId
-    );
+    const result = await callClaude({
+      step: "analysis",
+      model: env.ANALYSIS_MODEL,
+      system: METHODOLOGY_ANALYSIS,
+      userText: `Вот заполненная анкета:\n\n${prepText}`,
+      sessionId,
+    });
     usage.push(result.usage);
 
     // Красный флаг проверяем до разбора полей: в таком ответе методология
@@ -267,13 +280,13 @@ export async function generateRecommendationDraft(
   }
 
   const writerResult = await withOneRetry(async () => {
-    const result = await callModel(
-      "writer",
-      env.WRITER_MODEL,
-      VOICE_PROMPT,
-      analysisResult.text,
-      sessionId
-    );
+    const result = await callClaude({
+      step: "writer",
+      model: env.WRITER_MODEL,
+      system: VOICE_PROMPT,
+      userText: analysisResult.text,
+      sessionId,
+    });
     usage.push(result.usage);
     return { ...result, ...splitByMarkers(result.text) };
   });

@@ -8,12 +8,17 @@ import {
   formatUsageLine,
   generateRecommendationDraft,
 } from "./claudeApi";
+import { PaidRedFlagError, generatePdfDraft } from "./paidPdf";
+import { PROJECT_ROOT } from "./prompts";
 import { QUESTIONS, QuestionDef, getFirstQuestionNumber, getNextQuestionNumber, getQuestion } from "./questions";
+import { InputFile } from "grammy";
+import { join } from "path";
 import {
   csatKeyboard,
   editMoreKeyboard,
-  fakeDoorKeyboard,
+  exampleFollowupKeyboard,
   multiChoiceKeyboard,
+  offerKeyboard,
   singleChoiceKeyboard,
   summaryKeyboard,
 } from "./keyboards";
@@ -98,7 +103,7 @@ export async function handleIncoming(ctx: Context) {
     case "AWAITING_RECOMMENDATION":
       return handleAwaitingRecommendation(ctx, session, messageText);
     case "FAKE_DOOR_OFFER":
-      return handleFakeDoor(ctx, session, callbackData);
+      return handleOffer(ctx, session, callbackData);
     case "CSAT_RATING":
       return handleCsatRating(ctx, session, callbackData);
     case "CSAT_FEEDBACK":
@@ -791,7 +796,7 @@ export async function handleGotoCommand(ctx: Context, arg: string) {
 // и стереть его ответы, чтобы следующий проход был с чистого листа.
 // Ждущую отправки рекомендацию тоже удаляем: анкета, под которую её
 // готовили, только что стёрлась, и висеть в /pending ей незачем.
-// Запись fakeDoorOffer намеренно остаётся — на ней держится /stats.
+// События оффера намеренно остаются — на них держится /stats.
 export async function handleResetCommand(ctx: Context) {
   const from = ctx.from;
   if (!from || !ctx.chat) return;
@@ -824,25 +829,211 @@ async function handleAwaitingRecommendation(ctx: Context, session: Session, mess
   return ctx.reply(texts.addendumAck);
 }
 
-// ── Fake door экран оплаты ──────────────────────────────────────────
+// ── Оффер платного PDF ──────────────────────────────────────────────
 
-async function handleFakeDoor(ctx: Context, session: Session, callbackData?: string) {
-  const offer = await prisma.fakeDoorOffer.findUnique({ where: { telegramId: session.telegramId } });
-  // Цену берём из записи оффера: у тех, кому её показали до перехода на
-  // единую цену, там осталась своя.
-  const price = offer?.priceRub ?? env.PRODUCT_PRICE_RUB;
+// Файл-пример один на всех, и Telegram разрешает переотправлять его по
+// идентификатору вместо повторной загрузки. Держим в памяти процесса:
+// после перезапуска просто загрузится ещё раз.
+let exampleFileId: string | null = null;
 
-  if (callbackData === "fakedoor_pay") {
-    await prisma.fakeDoorOffer
-      .update({ where: { telegramId: session.telegramId }, data: { clickedAt: new Date() } })
-      .catch(() => {});
-    await ctx.reply(texts.fakeDoorClicked);
-  } else if (callbackData !== "fakedoor_skip") {
-    return ctx.reply(texts.fakeDoorOffer, { reply_markup: fakeDoorKeyboard(price) });
+async function sendExamplePdf(ctx: Context) {
+  const price = env.PDF_PRICE_RUB;
+
+  if (exampleFileId) {
+    await ctx.replyWithDocument(exampleFileId);
+  } else {
+    const path = join(PROJECT_ROOT, "assets/example/Drema_plan_sna_primer.pdf");
+    const sent = await ctx.replyWithDocument(new InputFile(path));
+    exampleFileId = sent.document?.file_id ?? null;
   }
 
-  await prisma.session.update({ where: { telegramId: session.telegramId }, data: { stage: "CSAT_RATING" } });
-  return ctx.reply(texts.csatPrompt, { reply_markup: csatKeyboard() });
+  return ctx.reply(texts.exampleFollowup, { reply_markup: exampleFollowupKeyboard(price) });
+}
+
+async function handleOffer(ctx: Context, session: Session, callbackData?: string) {
+  const price = env.PDF_PRICE_RUB;
+
+  if (callbackData === "offer_example") {
+    await logOfferEvent(session.telegramId, "example_clicked");
+    return sendExamplePdf(ctx);
+  }
+
+  if (callbackData === "offer_buy") {
+    await dropKeyboard(ctx);
+    await logOfferEvent(session.telegramId, "buy_clicked");
+    return handleBuy(ctx, session);
+  }
+
+  if (callbackData === "offer_decline") {
+    await dropKeyboard(ctx);
+    await prisma.session.update({
+      where: { telegramId: session.telegramId },
+      data: { stage: "CSAT_RATING" },
+    });
+    return ctx.reply(texts.csatPrompt, { reply_markup: csatKeyboard() });
+  }
+
+  // Нажали кнопку старого сообщения выше по чату — молча игнорируем.
+  if (callbackData) return;
+  return ctx.reply(texts.paidOffer, { reply_markup: offerKeyboard(price) });
+}
+
+// Повторное «Купить» не создаёт второй заказ: отвечаем по статусу
+// существующего.
+async function handleBuy(ctx: Context, session: Session) {
+  const existing = await prisma.order.findFirst({
+    where: {
+      telegramId: session.telegramId,
+      status: { in: ["GENERATING", "DRAFT_READY", "SENT"] },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  if (existing) {
+    return ctx.reply(
+      existing.status === "SENT" ? texts.orderAlreadySent : texts.orderAlreadyGenerating
+    );
+  }
+
+  const order = await createPdfOrder(session.telegramId);
+  await ctx.reply(texts.orderAccepted);
+
+  await ctx.api
+    .sendMessage(Number(env.ADMIN_TELEGRAM_ID), `🧾 Новый заказ PDF #${order.id} от #${session.telegramId}`)
+    .catch((error) => console.error("Не удалось сообщить админу о заказе:", error));
+
+  // Создание заказа и его выполнение намеренно разделены: когда появится
+  // оплата, генерация будет запускаться по событию «заказ можно
+  // выполнять», а не прямо отсюда. Результата не ждём — обращения к
+  // модели идут десятки секунд, а бот обрабатывает сообщения по одному.
+  void runPdfGeneration(ctx.api, order.id);
+}
+
+export async function createPdfOrder(telegramId: bigint) {
+  return prisma.order.create({
+    data: { telegramId, product: "PDF", priceRub: env.PDF_PRICE_RUB, status: "GENERATING" },
+  });
+}
+
+async function logOfferEvent(telegramId: bigint, type: "offer_shown" | "example_clicked" | "buy_clicked") {
+  await prisma.offerEvent
+    .create({ data: { telegramId, type } })
+    .catch((error) => console.error("Не удалось записать событие оффера:", error));
+}
+
+// ── Генерация платного PDF ──────────────────────────────────────────
+
+// Собирает вход для P1 из того, что уже сохранено по бесплатному
+// разбору, и запускает оба шага. Ничего не бросает наружу: фоновая
+// задача, её сбой не должен ронять бота.
+//
+// Запускать только через void: бот обрабатывает входящие сообщения
+// строго по одному, и ожидание двух вызовов модели заморозило бы его
+// для всех остальных на минуты.
+export async function runPdfGeneration(api: Api, orderId: number, reviewerComment?: string) {
+  const adminChatId = Number(env.ADMIN_TELEGRAM_ID);
+
+  const order = await prisma.order.findUnique({ where: { id: orderId } });
+  if (!order) return console.error(`Заказ #${orderId} не найден, генерация отменена.`);
+
+  try {
+    const recommendation = await prisma.recommendation.findUnique({
+      where: { telegramId: order.telegramId },
+    });
+    if (!recommendation?.analysis || !recommendation.message1 || !recommendation.message2) {
+      throw new Error("Нет сохранённого бесплатного разбора: не из чего собирать план.");
+    }
+
+    const answers = await getAnswersMap(order.telegramId);
+    const ageMonths = Number(answers[1]);
+    if (!Number.isFinite(ageMonths)) {
+      throw new Error("В анкете не разобрать возраст малыша — не выбрать группу памятки.");
+    }
+
+    const draft = await generatePdfDraft(
+      {
+        analysis: recommendation.analysis,
+        questionnaire: await buildPrepText(order.telegramId),
+        message1: recommendation.message1,
+        message2: recommendation.message2,
+        ageMonths,
+      },
+      String(order.telegramId),
+      reviewerComment
+    );
+    await recordApiCalls(draft.usage);
+
+    const costUsd = draft.usage.reduce<number | null>(
+      (sum, call) => (sum === null || call.costUsd === null ? null : sum + call.costUsd),
+      0
+    );
+    const tokens = (step: string) => draft.usage.find((u) => u.step === step);
+
+    // aiContent перезаписывается только перегенерацией — правки админа
+    // живут отдельно, в editedContent, и этим обновлением не затираются.
+    await prisma.pdfDraft.upsert({
+      where: { orderId },
+      create: {
+        orderId,
+        aiContent: draft.content as object,
+        rawPlan: draft.rawPlan,
+        reviewerNotes: draft.reviewerNotes,
+        planModel: env.PDF_PLAN_MODEL,
+        writerModel: env.PDF_WRITER_MODEL,
+        planTokensIn: tokens("pdf_plan")?.inputTokens ?? 0,
+        planTokensOut: tokens("pdf_plan")?.outputTokens ?? 0,
+        writerTokensIn: tokens("pdf_writer")?.inputTokens ?? 0,
+        writerTokensOut: tokens("pdf_writer")?.outputTokens ?? 0,
+        costUsd,
+      },
+      update: {
+        aiContent: draft.content as object,
+        rawPlan: draft.rawPlan,
+        reviewerNotes: draft.reviewerNotes,
+        planModel: env.PDF_PLAN_MODEL,
+        writerModel: env.PDF_WRITER_MODEL,
+        planTokensIn: tokens("pdf_plan")?.inputTokens ?? 0,
+        planTokensOut: tokens("pdf_plan")?.outputTokens ?? 0,
+        writerTokensIn: tokens("pdf_writer")?.inputTokens ?? 0,
+        writerTokensOut: tokens("pdf_writer")?.outputTokens ?? 0,
+        costUsd,
+        generationCount: { increment: 1 },
+      },
+    });
+
+    await prisma.order.update({ where: { id: orderId }, data: { status: "DRAFT_READY" } });
+
+    const memoWarning = draft.memoReady
+      ? ""
+      : `\n⚠️ Памятка для группы ${draft.content.relaxationGroup} не готова — отправлять нельзя.`;
+    await api.sendMessage(
+      adminChatId,
+      `📝 Черновик PDF #${orderId} готов (пользователь #${order.telegramId}).\n` +
+        `${formatUsageLine(draft.usage)}${memoWarning}\n\n` +
+        `Страница заказа в админке появится на следующем этапе.`
+    );
+  } catch (error) {
+    const redFlag = error instanceof PaidRedFlagError;
+    const reason = redFlag
+      ? "красный флаг — решить вручную"
+      : error instanceof Error
+        ? error.message
+        : String(error);
+
+    if (!redFlag) console.error(`Не удалось собрать PDF для заказа #${orderId}:`, error);
+
+    await prisma.order
+      .update({ where: { id: orderId }, data: { status: "FAILED", failReason: reason } })
+      .catch((dbError) => console.error("И статус заказа обновить не вышло:", dbError));
+
+    await api
+      .sendMessage(
+        adminChatId,
+        `❌ Заказ PDF #${orderId} (пользователь #${order.telegramId}) не собрался.\n\n` +
+          `Причина: ${reason}\n\nПользователю ничего не отправлено, он ждёт.`
+      )
+      .catch((sendError) => console.error("И сообщить об этом не вышло:", sendError));
+  }
 }
 
 // ── CSAT ─────────────────────────────────────────────────────────────
@@ -897,39 +1088,29 @@ async function markSentAndShowOffer(api: Api, telegramId: bigint, chatId: bigint
     data: { status: "sent", sentAt: new Date() },
   });
 
-  const price = env.PRODUCT_PRICE_RUB;
-  await prisma.fakeDoorOffer.upsert({
-    where: { telegramId },
-    update: { priceRub: price, shownAt: new Date(), clickedAt: null },
-    create: { telegramId, priceRub: price },
-  });
-
   await prisma.session.update({ where: { telegramId }, data: { stage: "FAKE_DOOR_OFFER" } });
 
-  await api.sendMessage(Number(chatId), texts.fakeDoorOffer, {
-    reply_markup: fakeDoorKeyboard(price),
+  await logOfferEvent(telegramId, "offer_shown");
+  await api.sendMessage(Number(chatId), texts.paidOffer, {
+    reply_markup: offerKeyboard(env.PDF_PRICE_RUB),
   });
 }
 
-// Ручной путь (/send): 4 сообщения, собранные тобой в переписке с ботом.
+// Ручной путь (/send): два сообщения, собранные тобой в переписке с ботом.
+// Сохраняем именно их, а не черновик модели: платный шаг P1 опирается на
+// то, что родитель реально прочитал.
 export async function deliverRecommendation(
   api: Api,
   telegramId: bigint,
   chatId: bigint,
-  messages: [string, string, string, string]
+  messages: [string, string]
 ) {
-  for (const m of messages) {
-    await sendLongMessage(api, chatId, m);
-  }
+  await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading1, messages[0]), true);
+  await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading2, messages[1]), true);
 
   await prisma.recommendation.update({
     where: { telegramId },
-    data: {
-      message1: messages[0],
-      message2: messages[1],
-      message3: messages[2],
-      message4: messages[3],
-    },
+    data: { message1: messages[0], message2: messages[1] },
   });
 
   await markSentAndShowOffer(api, telegramId, chatId);
