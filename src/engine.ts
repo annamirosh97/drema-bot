@@ -15,6 +15,8 @@ import { orderUrl } from "./web/server";
 import { QUESTIONS, QuestionDef, getFirstQuestionNumber, getNextQuestionNumber, getQuestion } from "./questions";
 import { InputFile } from "grammy";
 import { join } from "path";
+import { createHash } from "crypto";
+import { readFileSync } from "fs";
 import {
   csatKeyboard,
   editMoreKeyboard,
@@ -865,23 +867,51 @@ async function handleAwaitingRecommendation(ctx: Context, session: Session, mess
 
 // ── Оффер платного PDF ──────────────────────────────────────────────
 
-// Файл-пример один на всех, и Telegram разрешает переотправлять его по
-// идентификатору вместо повторной загрузки. Держим в памяти процесса:
-// после перезапуска просто загрузится ещё раз.
-let exampleFileId: string | null = null;
+const EXAMPLE_PDF_PATH = join(PROJECT_ROOT, "assets/example/Drema_plan_sna_primer.pdf");
+
+// Telegram разрешает переотправлять уже загруженный файл по
+// идентификатору, не загружая его заново. Храним идентификатор вместе с
+// хэшем содержимого: если пример в репозитории заменили, хэш разойдётся
+// и файл уйдёт на загрузку заново.
+//
+// Сам кэш живёт в памяти процесса и перезапуск не переживает, так что
+// после деплоя новый пример подхватится и без проверки хэша. Хэш нужен
+// на случай подмены файла без перезапуска и чтобы правило осталось
+// явным, если кэш когда-нибудь переедет в базу.
+let exampleCache: { fileId: string; hash: string } | null = null;
+
+// Файл около 800 КБ, а кнопку нажимают редко — читать и хэшировать его
+// на каждое нажатие дешевле, чем держать хэш и не замечать подмену.
+function exampleFileHash(): string {
+  return createHash("sha256").update(readFileSync(EXAMPLE_PDF_PATH)).digest("hex");
+}
+
+function exampleFollowUp(ctx: Context) {
+  return ctx.reply(texts.exampleFollowup, {
+    reply_markup: exampleFollowupKeyboard(env.PDF_PRICE_RUB),
+  });
+}
 
 async function sendExamplePdf(ctx: Context) {
-  const price = env.PDF_PRICE_RUB;
+  const hash = exampleFileHash();
 
-  if (exampleFileId) {
-    await ctx.replyWithDocument(exampleFileId);
-  } else {
-    const path = join(PROJECT_ROOT, "assets/example/Drema_plan_sna_primer.pdf");
-    const sent = await ctx.replyWithDocument(new InputFile(path));
-    exampleFileId = sent.document?.file_id ?? null;
+  if (exampleCache?.hash === hash) {
+    try {
+      await ctx.replyWithDocument(exampleCache.fileId);
+      return exampleFollowUp(ctx);
+    } catch (error) {
+      // Идентификатор мог устареть на стороне Telegram. Родителю эта
+      // ошибка ни о чём не говорит — просто грузим файл заново.
+      console.error("Не удалось отправить пример по file_id, загружаю заново:", error);
+      exampleCache = null;
+    }
   }
 
-  return ctx.reply(texts.exampleFollowup, { reply_markup: exampleFollowupKeyboard(price) });
+  const sent = await ctx.replyWithDocument(new InputFile(EXAMPLE_PDF_PATH));
+  const fileId = sent.document?.file_id;
+  if (fileId) exampleCache = { fileId, hash };
+
+  return exampleFollowUp(ctx);
 }
 
 async function handleOffer(ctx: Context, session: Session, callbackData?: string) {
