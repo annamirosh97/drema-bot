@@ -94,19 +94,30 @@ function parseScheduleVariants(body: Record<string, unknown>): ScheduleVariant[]
 // ── Сервер ──────────────────────────────────────────────────────────
 
 export function startAdminServer(api: Api) {
-  if (!env.ADMIN_PASSWORD) {
-    console.warn(
-      "ADMIN_PASSWORD не задан — веб-админка не поднята. Бот работает, " +
-        "но проверять черновики PDF будет негде. Задай переменную и перезапусти."
-    );
-    return;
-  }
-
   const app = express();
   app.use(express.urlencoded({ extended: false }));
-  app.use("/admin", requireAuth);
 
-  // Railway проверяет живость сервиса по корню — отвечаем без пароля.
+  // Сервер поднимаем всегда, даже когда пароль не задан. Если не
+  // поднять, хостингу некуда маршрутизировать запрос, и в браузере
+  // вместо объяснения получается «Application failed to respond», по
+  // которому не понять, бот упал, порт не тот или дело в переменной.
+  // Поэтому без пароля админка отвечает честным 503 с объяснением.
+  app.use("/admin", (req, res, next) => {
+    if (!env.ADMIN_PASSWORD) {
+      return res
+        .status(503)
+        .type("html")
+        .send(
+          "<h1>Админка не настроена</h1>" +
+            "<p>Не задана переменная окружения <code>ADMIN_PASSWORD</code>. " +
+            "Добавь её в Variables сервиса и перезапусти деплой.</p>" +
+            "<p>Сам бот при этом работает.</p>"
+        );
+    }
+    return requireAuth(req, res, next);
+  });
+
+  // Хостинг проверяет живость сервиса по корню — отвечаем без пароля.
   app.get("/", (_req, res) => res.send("Дрёма-бот жив. Админка — /admin/orders"));
 
   app.get("/admin/orders", async (_req, res) => {
@@ -204,9 +215,16 @@ export function startAdminServer(api: Api) {
     res.status(500).send("Что-то пошло не так. Подробности — в логах приложения.");
   });
 
-  app.listen(env.PORT, () => {
+  // Слушаем 0.0.0.0, а не localhost: внутри контейнера запрос приходит
+  // с другого интерфейса, и на localhost его просто никто не услышит.
+  app.listen(env.PORT, "0.0.0.0", () => {
+    console.log(`HTTP-сервер слушает 0.0.0.0:${env.PORT}`);
+    if (!env.ADMIN_PASSWORD) {
+      console.warn("ADMIN_PASSWORD не задан — админка отвечает 503. Бот работает.");
+      return;
+    }
     const base = env.PUBLIC_BASE_URL || `http://localhost:${env.PORT}`;
-    console.log(`Админка поднята: ${base}/admin/orders`);
+    console.log(`Админка: ${base}/admin/orders`);
   });
 }
 

@@ -50,7 +50,7 @@ bot.catch((err) => {
 async function main() {
   console.log("Дрёма-бот запускается...");
   // Веб-админка живёт в этом же процессе. Если ADMIN_PASSWORD не задан,
-  // она просто не поднимется — бот от этого не пострадает.
+  // сервер всё равно поднимается, но админка отвечает 503 с объяснением.
   startAdminServer(bot.api);
   await bot.start({
     onStart: (botInfo) => console.log(`Бот @${botInfo.username} запущен и слушает сообщения (long polling).`),
