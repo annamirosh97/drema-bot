@@ -95,6 +95,15 @@ export interface ClaudeCallOptions {
   userText: string;
   sessionId: string;
   maxTokens?: number;
+  // Рассуждение модели перед ответом. Выключено по умолчанию: оно
+  // тратит токены из того же лимита, что и сам ответ. Включать там, где
+  // в промпте много правил и важно, чтобы модель их соблюдала —
+  // с выключенным рассуждением Opus 5 следует инструкциям заметно хуже.
+  // Вместе с ним обязательно поднимать maxTokens.
+  thinking?: boolean;
+  // Глубина рассуждения: low дешевле и быстрее, high — тщательнее.
+  // Имеет смысл только вместе с thinking.
+  effort?: "low" | "medium" | "high";
 }
 
 // Единственное место, где бот обращается к модели. Повторы при 429, 5xx
@@ -108,15 +117,18 @@ export async function callClaude({
   userText,
   sessionId,
   maxTokens = MAX_TOKENS,
+  thinking = false,
+  effort,
 }: ClaudeCallOptions): Promise<{ text: string; usage: ApiCallUsage }> {
   const startedAt = Date.now();
 
   const response = await client.messages.create({
     model,
     max_tokens: maxTokens,
-    // Без extended thinking: на Opus 5 оно включено по умолчанию, поэтому
-    // выключаем явно. Иначе размышления съедят лимит в 1500 токенов.
-    thinking: { type: "disabled" },
+    // На Opus 5 рассуждение включено по умолчанию, поэтому выключать его
+    // нужно явно — иначе оно съест лимит, рассчитанный только на ответ.
+    thinking: thinking ? { type: "adaptive" } : { type: "disabled" },
+    ...(effort ? { output_config: { effort } } : {}),
     system,
     messages: [{ role: "user", content: userText }],
   });
@@ -311,6 +323,17 @@ export async function generateRecommendationDraft(
       system: VOICE_PROMPT,
       userText: analysisResult.text,
       sessionId,
+      // В промпте шага 2 полтора десятка правил голоса и блок
+      // самопроверки. С выключенным рассуждением модель их проговаривает
+      // мимо: в текстах оставались авторские тире, которые правило прямо
+      // запрещает. Низкой глубины хватает, чтобы она прошла по
+      // самопроверке, и это дешевле остальных уровней.
+      thinking: true,
+      effort: "low",
+      // Рассуждение тратит токены из общего лимита, поэтому его мало
+      // поднять — без запаса ответ оборвётся на середине второго
+      // сообщения. Проверка на stop_reason max_tokens это поймает.
+      maxTokens: 8000,
     });
     usage.push(result.usage);
     return { ...result, ...splitByMarkers(result.text) };
