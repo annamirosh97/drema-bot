@@ -1,7 +1,16 @@
 import { Api, Context, InlineKeyboard } from "grammy";
 import { prisma } from "./prisma";
 import { env } from "./env";
-import { photos, texts } from "./texts";
+import { formatPrice, photos, texts } from "./texts";
+import { buildPrepText, safeGetQuestion } from "./prep";
+import {
+  remindAboutConsentOnce,
+  remindAboutStuckConsults,
+  startConsultRequest,
+  takeConsultContact,
+  takeConsultSelfWrite,
+} from "./consult";
+import { handleUpsell } from "./upsell";
 import {
   ApiCallUsage,
   RedFlagError,
@@ -18,13 +27,15 @@ const GUIDE_PDF = "assets/guide/Drema_azbuka_sna.pdf";
 import { orderUrl } from "./web/server";
 import { QUESTIONS, QuestionDef, getFirstQuestionNumber, getNextQuestionNumber, getQuestion } from "./questions";
 import { InputFile } from "grammy";
-import { join } from "path";
 import {
+  CONSULT_SELF_WRITE_BUTTON,
   csatKeyboard,
   editMoreKeyboard,
   exampleFollowupKeyboard,
   multiChoiceKeyboard,
-  offerKeyboard,
+  offerChoiceKeyboard,
+  offerConsultCardKeyboard,
+  offerPdfCardKeyboard,
   singleChoiceKeyboard,
   summaryKeyboard,
 } from "./keyboards";
@@ -62,13 +73,6 @@ async function getAnswersMap(telegramId: bigint): Promise<Record<number, string>
   return map;
 }
 
-function safeGetQuestion(number: number): QuestionDef | null {
-  try {
-    return getQuestion(number);
-  } catch {
-    return null;
-  }
-}
 
 // ── Точка входа: вызывается и на текстовые сообщения, и на нажатия кнопок ──
 
@@ -96,6 +100,29 @@ export async function handleIncoming(ctx: Context) {
     return handleOffer(ctx, session, callbackData);
   }
 
+  // Предложение после покупки плана приходит, когда родитель давно
+  // прошёл весь сценарий, — его кнопки тем более не должны зависеть от
+  // стадии, в которой он остановился.
+  if (callbackData?.startsWith("upsell_")) {
+    return handleUpsell(ctx, session, callbackData);
+  }
+
+  // Выбор родителя по заявке на консультацию тоже разбираем до стадий, и
+  // по той же причине: клавиатура согласия — reply-клавиатура, она висит
+  // внизу чата и может переехать за пределы той стадии, в которой её
+  // показали. Нажатие должно сработать всё равно.
+  const contact = ctx.message?.contact;
+  if (contact) {
+    // Если ждать контакт было незачем — молчим: человек просто переслал
+    // визитку, отвечать на это нечего.
+    await takeConsultContact(ctx, session, contact);
+    return;
+  }
+
+  if (messageText === CONSULT_SELF_WRITE_BUTTON) {
+    if (await takeConsultSelfWrite(ctx, session)) return;
+  }
+
   switch (session.stage) {
     case "WELCOME":
       return handleWelcome(ctx, session, callbackData);
@@ -119,6 +146,8 @@ export async function handleIncoming(ctx: Context) {
       return handleAwaitingRecommendation(ctx, session, messageText);
     case "FAKE_DOOR_OFFER":
       return handleOffer(ctx, session, callbackData);
+    case "CONSULT_CONSENT":
+      return remindAboutConsentOnce(ctx, session);
     case "CSAT_RATING":
       return handleCsatRating(ctx, session, callbackData);
     case "CSAT_FEEDBACK":
@@ -897,13 +926,32 @@ const EXAMPLE_PDF = "assets/example/Drema_plan_sna_primer.pdf";
 
 function exampleFollowUp(ctx: Context) {
   return ctx.reply(texts.exampleFollowup, {
-    reply_markup: exampleFollowupKeyboard(env.PDF_PRICE_RUB),
+    reply_markup: exampleFollowupKeyboard(formatPrice(env.PDF_PRICE_RUB)),
   });
 }
 
 async function sendExamplePdf(ctx: Context) {
   await sendCachedDocument(ctx, projectFile(EXAMPLE_PDF));
   return exampleFollowUp(ctx);
+}
+
+// Цены на кнопках и в текстах — из env, с пробелом-разделителем тысяч.
+function pdfPrice(): string {
+  return formatPrice(env.PDF_PRICE_RUB);
+}
+
+function consultPrice(): string {
+  return formatPrice(env.CONSULT_PRICE_RUB);
+}
+
+// Шаг оффера — два сообщения: «Поддержка» без кнопок и «Выбор» с
+// кнопками. Карточки продуктов дальше подменяют текст второго
+// сообщения, поэтому отдельным сообщением оно и уходит.
+async function sendOfferMessages(api: Api, chatId: bigint) {
+  await api.sendMessage(Number(chatId), texts.offerSupport);
+  await api.sendMessage(Number(chatId), texts.offerChoice(pdfPrice(), consultPrice()), {
+    reply_markup: offerChoiceKeyboard(),
+  });
 }
 
 // Отправляет оффер вручную, командой /offer. Ни стадию сессии, ни
@@ -913,37 +961,101 @@ async function sendExamplePdf(ctx: Context) {
 // покупкой без показа.
 export async function sendOfferTo(api: Api, telegramId: bigint, chatId: bigint) {
   await logOfferEvent(telegramId, "offer_shown");
-  await api.sendMessage(Number(chatId), texts.paidOffer, {
-    reply_markup: offerKeyboard(env.PDF_PRICE_RUB),
-  });
+  return sendOfferMessages(api, chatId);
+}
+
+// Карточка продукта подменяет собой сообщение «Выбор», а «← Назад»
+// возвращает его обратно: так в чате не растёт лента сообщений, из
+// которой непонятно, что из этого ещё актуально.
+//
+// Если править не дали (сообщение слишком старое, его удалили), карточка
+// уходит новым сообщением — хуже выглядит, но работает.
+async function replaceWithCard(ctx: Context, text: string, markup: InlineKeyboard) {
+  try {
+    await ctx.editMessageText(text, { reply_markup: markup });
+  } catch (error) {
+    // Повторный тап по той же кнопке: сообщение уже такое, какое нужно.
+    // Отправлять копию было бы хуже, чем не делать ничего.
+    if (String(error).includes("message is not modified")) return;
+    await ctx.reply(text, { reply_markup: markup });
+  }
 }
 
 async function handleOffer(ctx: Context, session: Session, callbackData?: string) {
-  const price = env.PDF_PRICE_RUB;
+  if (callbackData === "offer_pdf_details") {
+    await logOfferEvent(session.telegramId, "offer_pdf_details");
+    return replaceWithCard(ctx, texts.offerPdfCard(pdfPrice()), offerPdfCardKeyboard(pdfPrice()));
+  }
+
+  if (callbackData === "offer_consult_details") {
+    await logOfferEvent(session.telegramId, "offer_consult_details");
+    return replaceWithCard(
+      ctx,
+      texts.offerConsultCard(consultPrice()),
+      offerConsultCardKeyboard(consultPrice())
+    );
+  }
+
+  if (callbackData === "offer_back") {
+    await logOfferEvent(session.telegramId, "offer_back");
+    return replaceWithCard(
+      ctx,
+      texts.offerChoice(pdfPrice(), consultPrice()),
+      offerChoiceKeyboard()
+    );
+  }
 
   if (callbackData === "offer_example") {
     await logOfferEvent(session.telegramId, "example_clicked");
     return sendExamplePdf(ctx);
   }
 
+  // Карточку после нажатия намеренно не меняем: вернуться к ней и
+  // посмотреть пример человек может и после того, как нажал «Купить».
   if (callbackData === "offer_buy") {
-    await dropKeyboard(ctx);
     await logOfferEvent(session.telegramId, "buy_clicked");
     return handleBuy(ctx, session);
   }
 
-  if (callbackData === "offer_decline") {
-    await dropKeyboard(ctx);
-    await prisma.session.update({
-      where: { telegramId: session.telegramId },
-      data: { stage: "CSAT_RATING" },
-    });
-    return ctx.reply(texts.csatPrompt, { reply_markup: csatKeyboard() });
+  if (callbackData === "offer_consult_signup") {
+    await logOfferEvent(session.telegramId, "consult_signup");
+    return startConsultRequest(ctx, session);
   }
+
+  if (callbackData === "offer_decline") return handleDecline(ctx, session);
 
   // Нажали кнопку старого сообщения выше по чату — молча игнорируем.
   if (callbackData) return;
-  return ctx.reply(texts.paidOffer, { reply_markup: offerKeyboard(price) });
+  return sendOfferMessages(ctx.api, session.chatId);
+}
+
+// «Пока не нужно». Сообщение «Выбор» не трогаем: кнопки остаются в
+// чате, и на них ссылается текст ответа. О причине отказа отдельно не
+// спрашиваем — вместо этого сразу идёт CSAT по всему опыту.
+async function handleDecline(ctx: Context, session: Session) {
+  // Повторный тап не должен присылать второе такое же сообщение.
+  // Сутки — ровно то окно, за которое человек видит оффер в чате; потом
+  // отказ имеет смысл записать заново.
+  const declinedRecently = await prisma.offerEvent.findFirst({
+    where: {
+      telegramId: session.telegramId,
+      type: "offer_declined",
+      createdAt: { gte: new Date(Date.now() - 24 * 3_600_000) },
+    },
+  });
+  if (declinedRecently) return;
+
+  await logOfferEvent(session.telegramId, "offer_declined");
+  await ctx.reply(texts.offerDeclined);
+
+  // Если человек уже проходил CSAT, второй раз не спрашиваем.
+  if (session.stage === "CSAT_FEEDBACK" || session.stage === "CSAT_DONE") return;
+
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "CSAT_RATING" },
+  });
+  return ctx.reply(texts.csatPrompt, { reply_markup: csatKeyboard() });
 }
 
 // Повторное «Купить» не создаёт второй заказ: отвечаем по статусу
@@ -983,7 +1095,17 @@ export async function createPdfOrder(telegramId: bigint) {
   });
 }
 
-async function logOfferEvent(telegramId: bigint, type: "offer_shown" | "example_clicked" | "buy_clicked") {
+type OfferEventName =
+  | "offer_shown"
+  | "offer_pdf_details"
+  | "offer_consult_details"
+  | "offer_back"
+  | "example_clicked"
+  | "buy_clicked"
+  | "consult_signup"
+  | "offer_declined";
+
+async function logOfferEvent(telegramId: bigint, type: OfferEventName) {
   await prisma.offerEvent
     .create({ data: { telegramId, type } })
     .catch((error) => console.error("Не удалось записать событие оффера:", error));
@@ -1155,10 +1277,15 @@ const REMINDER_COOLDOWN_MS = 3 * 60 * 60 * 1000;
 // после перезапуска напомним заново, и это не беда.
 const lastReminded = new Map<number, number>();
 
+// Один таймер на все напоминания: и про заказы PDF, и про заявки на
+// консультацию. Проверки независимы, поэтому сбой одной не отменяет другую.
 export function startOrderReminders(api: Api) {
   setInterval(() => {
     void remindAboutStuckOrders(api).catch((error) =>
       console.error("Не удалось проверить зависшие заказы:", error)
+    );
+    void remindAboutStuckConsults(api).catch((error) =>
+      console.error("Не удалось проверить заявки на консультацию:", error)
     );
   }, REMINDER_INTERVAL_MS);
 }
@@ -1247,9 +1374,7 @@ async function markSentAndShowOffer(api: Api, telegramId: bigint, chatId: bigint
   await prisma.session.update({ where: { telegramId }, data: { stage: "FAKE_DOOR_OFFER" } });
 
   await logOfferEvent(telegramId, "offer_shown");
-  await api.sendMessage(Number(chatId), texts.paidOffer, {
-    reply_markup: offerKeyboard(env.PDF_PRICE_RUB),
-  });
+  await sendOfferMessages(api, chatId);
 }
 
 // Ручной путь (/send): два сообщения, собранные тобой в переписке с ботом.
@@ -1288,26 +1413,7 @@ export async function sendApprovedRecommendation(api: Api, telegramId: bigint, c
 
 // Текстовый дамп "Вопрос/Ответ" для конкретного пользователя — чтобы
 // скопировать в Claude при подготовке рекомендации (замена листа `prep`).
-export async function buildPrepText(telegramId: bigint): Promise<string> {
-  const session = await prisma.session.findUnique({ where: { telegramId } });
-  const rows = await prisma.answer.findMany({ where: { telegramId }, orderBy: { questionNumber: "asc" } });
-
-  const qaLines: string[] = [];
-  const addenda: string[] = [];
-
-  for (const r of rows) {
-    if (r.questionNumber === -3 || r.questionNumber === 30 || r.questionNumber === 31) continue;
-    if (r.questionNumber === 99) {
-      addenda.push(r.answerText);
-      continue;
-    }
-    const q = safeGetQuestion(r.questionNumber);
-    const label = q ? q.text.replace(/\n/g, " ") : `Вопрос ${r.questionNumber}`;
-    qaLines.push(`Вопрос: ${label}\nОтвет: ${r.answerText}`);
-  }
-
-  let out = qaLines.join("\n\n") || "Нет сохранённых ответов.";
-  if (addenda.length) out += `\n\n— Дополнительно от пользователя —\n${addenda.join("\n")}`;
-  if (session?.yellowFlags.length) out += `\n\n⚠️ Обратить внимание: ${session.yellowFlags.join(", ")}`;
-  return out;
-}
+// Сама функция живёт в src/prep.ts: она нужна ещё админке и пакету
+// заявки на консультацию. Здесь — только реэкспорт, чтобы не править
+// импорты во всех вызывающих файлах.
+export { buildPrepText } from "./prep";

@@ -27,6 +27,7 @@ enum Stage {
   EDIT_MORE // ждём ответ «менять ли что-то ещё»
   AWAITING_RECOMMENDATION // анкета подтверждена, ждём, пока admin пришлёт разбор
   FAKE_DOOR_OFFER // показан экран оплаты, ждём "Оплатить" / "Не сейчас"
+  CONSULT_CONSENT // записался на консультацию, ждём, поделится ли контактом
   CSAT_RATING // ждём оценку 1-5
   CSAT_FEEDBACK // ждём открытый отзыв
   CSAT_DONE // всё завершено
@@ -62,10 +63,12 @@ model Session {
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
 
-  answers        Answer[]
-  recommendation Recommendation?
-  orders         Order[]
-  offerEvents    OfferEvent[]
+  answers         Answer[]
+  recommendation  Recommendation?
+  orders          Order[]
+  offerEvents     OfferEvent[]
+  consultRequests ConsultRequest[]
+  upsellOffer     UpsellOffer?
 
   @@index([status])
 }
@@ -190,11 +193,22 @@ model PdfDraft {
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
 
-// Воронка оффера: показ, клик по примеру, клик по «Купить».
+// Воронка оффера: показ экрана выбора, открытие карточек, возврат
+// назад, клик по примеру, покупка плана, запись на консультацию, отказ.
 enum OfferEventType {
   offer_shown
   example_clicked
   buy_clicked
+  offer_pdf_details
+  offer_consult_details
+  offer_back
+  consult_signup
+  offer_declined
+  upsell_shown
+  upsell_details
+  upsell_signup
+  upsell_declined
+  upsell_expired_click
 }
 
 model OfferEvent {
@@ -207,4 +221,86 @@ model OfferEvent {
 
   @@index([telegramId])
   @@index([type])
+}
+
+// PENDING_PAYMENT и PAID заведены заранее, как у заказа PDF: позже между
+// кнопкой «Записаться» и отправкой заявки специалисту встанет оплата.
+enum ConsultStatus {
+  PENDING_PAYMENT
+  PAID
+  NEW
+  CONTACTED
+  DONE
+  CANCELED
+}
+
+// Кто пишет первым. PENDING — родитель ещё не выбрал, и до его выбора
+// заявка специалисту не уходит: передавать контакт без разрешения нельзя.
+enum FirstContact {
+  PENDING
+  SPECIALIST
+  PARENT
+}
+
+// Откуда пришла заявка: из основного оффера после бесплатного разбора
+// или из предложения со скидкой, которое уходит после покупки плана.
+enum ConsultSource {
+  OFFER
+  AFTER_PDF
+}
+
+// Заявка на консультацию специалиста. Создаётся по кнопке «Записаться».
+model ConsultRequest {
+  id               Int           @id @default(autoincrement())
+  telegramId       BigInt
+  priceRub         Int // цена, показанная этому родителю на кнопке
+  status           ConsultStatus @default(NEW)
+  parentUsername   String? // без «@»; у аккаунта может не быть username
+  parentPhone      String? // только если родитель сам поделился контактом
+  contactConsentAt DateTime? // когда родитель разрешил передать контакт
+  firstContact     FirstContact  @default(PENDING)
+  source           ConsultSource @default(OFFER)
+  // Заказ плана, после которого пришло предложение со скидкой. Есть
+  // только у заявок с source = AFTER_PDF: по нему специалисту уходит
+  // тот же PDF, что получил родитель.
+  orderId          Int?
+  createdAt        DateTime      @default(now())
+  contactedAt      DateTime?
+  doneAt           DateTime?
+  canceledAt       DateTime?
+
+  // Под будущую оплату: пока не заполняются.
+  yookassaPaymentId String?
+  paidAt            DateTime?
+  refundedAt        DateTime?
+
+  session Session      @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+  upsell  UpsellOffer?
+
+  @@index([telegramId])
+  @@index([status])
+}
+
+// Предложение консультации со скидкой после покупки плана. Отдельная
+// таблица, а не поле у заказа: предложение одно на родителя, даже если
+// планов он купил несколько, и у него своя жизнь — срок и отказ.
+model UpsellOffer {
+  id           Int      @id @default(autoincrement())
+  telegramId   BigInt   @unique
+  orderId      Int // заказ плана, после которого ушло предложение
+  priceRub     Int // цена со скидкой, показанная этому родителю
+  fullPriceRub Int // обычная цена на момент отправки — для сравнения в тексте
+  sentAt       DateTime @default(now())
+  expiresAt    DateTime // конец дня по Москве, см. src/upsell.ts
+  // Сообщение с предложением: по нему его можно будет найти и поправить
+  // не только из обработчика нажатия.
+  messageId    Int?
+  declinedAt   DateTime?
+  // Заявка, если родитель всё-таки записался по этому предложению.
+  consultRequestId Int? @unique
+
+  session Session         @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+  consult ConsultRequest? @relation(fields: [consultRequestId], references: [id], onDelete: SetNull)
+
+  @@index([expiresAt])
 }

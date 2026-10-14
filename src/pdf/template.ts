@@ -209,7 +209,7 @@ p { margin: 0 0 2.6mm; } ul { margin: 0 0 3mm; padding-left: 5mm; } li { margin-
 .sched tr.wake td { background: #FDF0DC; } .sched tr.wake .i { color:#D9973F; }
 .sched tr.calm td { background: #FBE9E5; } .sched tr.calm .i { color: var(--pink); }
 .sched tr.night td { background: var(--navy); } .sched tr.night .t, .sched tr.night .e { color:#FFF6E6; } .sched tr.night .i { color: var(--peach); }
-.sdisc { margin-top: 5mm; font-size: 8.5pt; line-height: 1.5; color: var(--muted); background: var(--cream); border: 1px solid #EFE6D6; border-radius: 3mm; padding: 3.5mm 4.5mm; }
+.sdisc { margin-top: 5mm; font-size: 9.6pt; color: var(--ink); background:#F6F3FB; border-left: 3px solid var(--lav); border-radius: 0 3mm 3mm 0; padding: 3.5mm 4.5mm; }
 .note { margin-top: 6mm; font-size: 10.2pt; color: var(--ink); border-top: 1px solid #E8E3F2; padding-top: 5mm; }
 .note b { color: var(--navy); }
 .end { background: var(--navy); color: var(--cream); display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center; }

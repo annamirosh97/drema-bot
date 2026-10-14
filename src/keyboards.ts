@@ -1,4 +1,4 @@
-import { InlineKeyboard } from "grammy";
+import { InlineKeyboard, Keyboard } from "grammy";
 
 // Одна кнопка на строку — так же, как было сделано в Make.
 // callback_data = сам текст варианта (варианты в анкете короткие,
@@ -47,17 +47,87 @@ export function csatKeyboard(): InlineKeyboard {
   return kb;
 }
 
-// Оффер платного PDF после двух бесплатных сообщений.
-export function offerKeyboard(price: number): InlineKeyboard {
+// ── Оффер: выбор формата и карточки продуктов ───────────────────────
+//
+// Все callback_data начинаются с offer_ — такие нажатия разбираются до
+// стадий сессии (см. handleIncoming), чтобы кнопки под старыми
+// сообщениями в истории чата не умирали.
+
+// Сообщение «Выбор»: два продукта и отказ.
+export function offerChoiceKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("📄 Подробнее о плане", "offer_pdf_details")
+    .row()
+    .text("💬 Подробнее о консультации", "offer_consult_details")
+    .row()
+    .text("Пока не нужно", "offer_decline");
+}
+
+// Карточка плана. Подменяет текст сообщения «Выбор», поэтому «← Назад»
+// возвращает его на место.
+export function offerPdfCardKeyboard(price: string): InlineKeyboard {
   return new InlineKeyboard()
     .text(`Купить за ${price} ₽`, "offer_buy")
     .row()
-    .text("Посмотреть пример PDF", "offer_example")
+    .text("Посмотреть пример плана", "offer_example")
     .row()
-    .text("Спасибо, не нужно", "offer_decline");
+    .text("← Назад", "offer_back");
 }
 
-// Сообщение вслед за примером PDF: только кнопка покупки.
-export function exampleFollowupKeyboard(price: number): InlineKeyboard {
+// Карточка консультации. Имени специалиста на кнопке нет намеренно:
+// оно живёт в тексте карточки, а кнопка остаётся про формат услуги.
+export function offerConsultCardKeyboard(price: string): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(`Записаться за ${price} ₽`, "offer_consult_signup")
+    .row()
+    .text("← Назад", "offer_back");
+}
+
+// ── Предложение консультации после покупки плана ────────────────────
+//
+// Свой префикс upsell_, и эти нажатия тоже разбираются до стадий: к
+// моменту, когда предложение приходит, родитель обычно уже прошёл CSAT
+// и находится в стадии, где кнопок никто не ждёт.
+
+export function upsellOfferKeyboard(price: string): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("Подробнее о консультации", "upsell_details")
+    .row()
+    .text(`Записаться за ${price} ₽`, "upsell_signup")
+    .row()
+    .text("Пока не нужно", "upsell_decline");
+}
+
+export function upsellCardKeyboard(price: string): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(`Записаться за ${price} ₽`, "upsell_signup")
+    .row()
+    .text("← Назад", "upsell_back");
+}
+
+// Скидка кончилась — записаться можно, но уже по обычной цене. Кнопка
+// намеренно ведёт в тот же обработчик, что и основной оффер: это и есть
+// обычная запись, дублировать её незачем.
+export function upsellExpiredKeyboard(fullPrice: string): InlineKeyboard {
+  return new InlineKeyboard().text(`Записаться за ${fullPrice} ₽`, "offer_consult_signup");
+}
+
+// Сообщение вслед за примером плана: только кнопка покупки.
+export function exampleFollowupKeyboard(price: string): InlineKeyboard {
   return new InlineKeyboard().text(`Купить за ${price} ₽`, "offer_buy");
+}
+
+// Согласие на передачу контакта специалисту. Это reply-клавиатура, а не
+// inline: иначе Telegram не даст кнопку, которая присылает контакт.
+// Нажатие на вторую кнопку приходит обычным текстовым сообщением с её
+// подписью — поэтому подпись вынесена в константу и сверяется с текстом.
+export const CONSULT_SELF_WRITE_BUTTON = "Я напишу специалисту сам(а)";
+
+export function consultConsentKeyboard(): Keyboard {
+  return new Keyboard()
+    .requestContact("Поделиться контактом")
+    .row()
+    .text(CONSULT_SELF_WRITE_BUTTON)
+    .resized()
+    .oneTime();
 }

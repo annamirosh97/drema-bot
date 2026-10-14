@@ -8,16 +8,6 @@ HERE = Path(__file__).parent
 
 RECOMMENDATIONS = (HERE / "p2_recommendations.md").read_text(encoding="utf-8")
 SCHEDULE_INTRO = "Это ориентир, а не расписание по минутам: время может сдвигаться на 15–20 минут, и это нормально. Он построен от подъёма в 8:00. Главное — смотреть на признаки усталости малыша, а не только на часы."
-# Фиксированный блок под таблицей режима. Моделью не генерируется.
-# Дубль этого текста лежит в src/pdfTexts.ts — менять нужно оба места,
-# пока шаблон не перенесён в TypeScript.
-SCHEDULE_DISCLAIMER = (
-    "Этот режим — ориентир, который обычно подходит детям в возрасте вашего малыша. "
-    "Индивидуальные потребности в сне у каждого малыша свои, поэтому ваш режим может "
-    "отличаться. Чтобы подобрать и скорректировать режим именно под вашего малыша, "
-    "рекомендуем обратиться к консультанту по сну."
-)
-
 SCHEDULE_NOTE = "Приходите к этому режиму постепенно: сначала выровняйте подъём, потом понемногу удлиняйте утро, примерно на 5 минут в день, и следите, чтобы второй сон не затягивался. Если малыш явно устал раньше времени из таблицы, укладывайте по признакам усталости. Если дневные сны окажутся длиннее или короче, всё остальное сдвинется вслед за ними."
 SCHEDULE_ROWS = [  # строки из ===РЕЖИМ=== ответа P1
     ("08:00", "Подъём", "wake"),
@@ -29,6 +19,8 @@ SCHEDULE_ROWS = [  # строки из ===РЕЖИМ=== ответа P1
 # В продукте: OFFER_URL = PUBLIC_BASE_URL + "/offer", CONTACT_EMAIL — из env
 OFFER_URL = ""  # пусто — строка не выводится
 CONTACT_EMAIL = ""  # пусто — строка не выводится
+# Фиксированный текст шаблона, не генерируется моделью
+SCHEDULE_DISCLAIMER = "Этот режим — ориентир, который обычно подходит детям в возрасте вашего малыша. Индивидуальные потребности в сне у каждого малыша свои, поэтому ваш режим может отличаться. Чтобы подобрать и скорректировать режим именно под вашего малыша, рекомендуем обратиться к специалисту по сну."
 RELAXATION = (HERE / "relaxation_9-12.md").read_text(encoding="utf-8")
 
 
@@ -120,7 +112,7 @@ p { margin: 0 0 2.6mm; } ul { margin: 0 0 3mm; padding-left: 5mm; } li { margin-
 .sched tr.wake td { background: #FDF0DC; } .sched tr.wake .i { color:#D9973F; }
 .sched tr.calm td { background: #FBE9E5; } .sched tr.calm .i { color: var(--pink); }
 .sched tr.night td { background: var(--navy); } .sched tr.night .t, .sched tr.night .e { color:#FFF6E6; } .sched tr.night .i { color: var(--peach); }
-.sdisc { margin-top: 5mm; font-size: 8.5pt; line-height: 1.5; color: var(--muted); background: var(--cream); border: 1px solid #EFE6D6; border-radius: 3mm; padding: 3.5mm 4.5mm; }
+.sdisc { margin-top: 5mm; font-size: 9.6pt; color: var(--ink); background:#F6F3FB; border-left: 3px solid var(--lav); border-radius: 0 3mm 3mm 0; padding: 3.5mm 4.5mm; }
 .note { margin-top: 6mm; font-size: 10.2pt; color: var(--ink); border-top: 1px solid #E8E3F2; padding-top: 5mm; }
 .note b { color: var(--navy); }
 /* финал */
@@ -155,8 +147,7 @@ def build():
 
     rec = page("Часть 1", "Что попробовать в вашей ситуации", f'<div class="rec">{md(RECOMMENDATIONS)}</div>', 2)
     sched = page("Часть 2", "Примерный режим дня",
-                 f'<div class="intro">{inline(SCHEDULE_INTRO)}</div>{schedule_html()}'
-                 f'<div class="sdisc">{SCHEDULE_DISCLAIMER}</div>'
+                 f'<div class="intro">{inline(SCHEDULE_INTRO)}</div>{schedule_html()}<div class="sdisc">{inline(SCHEDULE_DISCLAIMER)}</div>'
                  f'<div class="note"><b>Как прийти к этому режиму.</b> {inline(SCHEDULE_NOTE)}</div>', 4)
     relax = page("Часть 3", "Памятка: как помочь малышу расслабиться перед сном", md(RELAXATION), 5)
     end = f"""<section class="page full end">{CLOUD}<h2>Спокойной ночи 💛</h2>

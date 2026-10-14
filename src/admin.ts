@@ -13,7 +13,7 @@ import {
   runPdfGeneration,
 } from "./engine";
 import { formatUsd } from "./claudeApi";
-import { orderUrl } from "./web/server";
+import { consultUrl, orderUrl } from "./web/server";
 
 function isAdmin(ctx: Context): boolean {
   return String(ctx.from?.id ?? "") === env.ADMIN_TELEGRAM_ID;
@@ -371,12 +371,13 @@ export function registerAdminCommands(bot: Bot) {
 
   bot.command("stats", async (ctx) => {
     if (!isAdmin(ctx)) return;
-    const [total, completed, declined, events, orders] = await Promise.all([
+    const [total, completed, declined, events, orders, consults] = await Promise.all([
       prisma.session.count(),
       prisma.session.count({ where: { status: "completed" } }),
       prisma.session.count({ where: { status: "declined" } }),
       prisma.offerEvent.findMany({ select: { telegramId: true, type: true } }),
       prisma.order.groupBy({ by: ["status"], _count: true }),
+      prisma.consultRequest.groupBy({ by: ["status"], _count: true }),
     ]);
 
     // Считаем по пользователям, а не по событиям: один человек может
@@ -384,29 +385,79 @@ export function registerAdminCommands(bot: Bot) {
     const usersBy = (type: string) =>
       new Set(events.filter((e) => e.type === type).map((e) => String(e.telegramId)));
     const shown = usersBy("offer_shown");
+    const pdfCard = usersBy("offer_pdf_details");
+    const consultCard = usersBy("offer_consult_details");
     const sawExample = usersBy("example_clicked");
     const bought = usersBy("buy_clicked");
+    const signedUp = usersBy("consult_signup");
+    const skipped = usersBy("offer_declined");
+
+    const upsellShown = usersBy("upsell_shown");
+    const upsellDetails = usersBy("upsell_details");
+    const upsellSignup = usersBy("upsell_signup");
+    const upsellDeclined = usersBy("upsell_declined");
+    const upsellExpired = usersBy("upsell_expired_click");
 
     const pct = (part: number, whole: number) => (whole ? `${Math.round((part / whole) * 100)}%` : "—");
+
+    // «Из открывших карточку» — доля тех, кто дошёл до покупки именно
+    // после того, как раскрыл подробности. Это и есть цена шага
+    // «карточка → оплата», отдельно от показа.
+    const line = (label: string, who: Set<string>, card: Set<string>) =>
+      `${label}: ${who.size} (${pct(who.size, shown.size)} от показов, ` +
+      `${pct(who.size, card.size)} от открывших карточку)`;
+
     const boughtAfterExample = [...bought].filter((id) => sawExample.has(id)).length;
     const withoutExample = [...shown].filter((id) => !sawExample.has(id));
     const boughtWithoutExample = [...bought].filter((id) => !sawExample.has(id)).length;
 
-    const byStatus = orders
-      .map((row) => `  ${row.status}: ${row._count}`)
-      .join("\n") || "  заказов пока нет";
+    const byStatus = (rows: { status: string; _count: number }[], empty: string) =>
+      rows.map((row) => `  ${row.status}: ${row._count}`).join("\n") || `  ${empty}`;
 
     await ctx.reply(
       `Всего пользователей: ${total}\n` +
         `Завершили анкету: ${completed}\n` +
         `Отказались: ${declined}\n\n` +
-        `Оффер показан: ${shown.size}\n` +
-        `Смотрели пример: ${sawExample.size} (${pct(sawExample.size, shown.size)})\n` +
-        `Нажали «Купить»: ${bought.size} (${pct(bought.size, shown.size)})\n\n` +
+        `Экран выбора показан: ${shown.size}\n` +
+        `Открыли карточку плана: ${pdfCard.size} (${pct(pdfCard.size, shown.size)})\n` +
+        `Открыли карточку консультации: ${consultCard.size} (${pct(consultCard.size, shown.size)})\n` +
+        `Смотрели пример плана: ${sawExample.size} (${pct(sawExample.size, shown.size)})\n` +
+        `«Пока не нужно»: ${skipped.size} (${pct(skipped.size, shown.size)})\n\n` +
+        `${line("Купили план", bought, pdfCard)}\n` +
+        `${line("Записались на консультацию", signedUp, consultCard)}\n\n` +
         `Из тех, кто смотрел пример: ${boughtAfterExample} из ${sawExample.size} (${pct(boughtAfterExample, sawExample.size)})\n` +
         `Из тех, кто не смотрел: ${boughtWithoutExample} из ${withoutExample.length} (${pct(boughtWithoutExample, withoutExample.length)})\n\n` +
-        `Заказы PDF:\n${byStatus}`
+        `Заказы PDF:\n${byStatus(orders, "заказов пока нет")}\n\n` +
+        `Заявки на консультацию:\n${byStatus(consults, "заявок пока нет")}\n\n` +
+        `После PDF:\n` +
+        `  предложений отправлено: ${upsellShown.size}\n` +
+        `  открыли карточку: ${upsellDetails.size} (${pct(upsellDetails.size, upsellShown.size)})\n` +
+        `  записались: ${upsellSignup.size} (${pct(upsellSignup.size, upsellShown.size)})\n` +
+        `  «Пока не нужно»: ${upsellDeclined.size} (${pct(upsellDeclined.size, upsellShown.size)})\n` +
+        `  нажали запись после срока: ${upsellExpired.size}`
     );
+  });
+
+  // Незакрытые заявки на консультацию со ссылками в админку.
+  bot.command("consults", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+
+    const requests = await prisma.consultRequest.findMany({
+      where: { status: { in: ["NEW", "CONTACTED"] } },
+      orderBy: { createdAt: "asc" },
+    });
+    if (!requests.length) return ctx.reply("Незакрытых заявок на консультацию нет.");
+
+    const lines = requests.map((request) => {
+      const hours = Math.floor((Date.now() - request.createdAt.getTime()) / 3_600_000);
+      const mark = request.status === "NEW" && hours >= 20 ? "🔴 " : "";
+      const who = request.parentUsername ? `@${request.parentUsername}` : "без username";
+      const waiting = request.firstContact === "PENDING" ? ", ждём согласия родителя" : "";
+      const link = consultUrl(request.id);
+      return `${mark}#${request.id} — ${who}, ${request.status}, ${hours} ч${waiting}` + (link ? `\n${link}` : "");
+    });
+
+    await ctx.reply(`Незакрытые заявки (${requests.length}):\n\n${lines.join("\n\n")}`);
   });
 }
 

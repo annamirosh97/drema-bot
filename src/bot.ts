@@ -1,9 +1,11 @@
 import { Bot, Context } from "grammy";
 import { env } from "./env";
 import { handleIncoming, handleGotoCommand, handleResetCommand } from "./engine";
+import { handleConsultStatusCallback } from "./consult";
 import { registerAdminCommands, handleAdminFlowMessage } from "./admin";
 import { startAdminServer } from "./web/server";
 import { startOrderReminders } from "./engine";
+import { startUpsellScheduler } from "./upsell";
 
 const bot = new Bot(env.BOT_TOKEN);
 
@@ -42,6 +44,17 @@ bot.on("message:text", async (ctx) => {
   await handleIncoming(ctx);
 });
 
+// Кнопка «Поделиться контактом» в заявке на консультацию присылает не
+// текст, а сообщение с контактом — без этого обработчика оно просто не
+// дошло бы до бота, и согласие на передачу контакта не работало бы.
+bot.on("message:contact", (ctx) => handleIncoming(ctx));
+
+// Кнопки статуса под заявкой на консультацию. Зарегистрированы ДО общего
+// обработчика нажатий: их жмёт в том числе специалист, у которой своей
+// анкеты в боте может не быть вовсе, и гонять её через движок анкеты
+// незачем.
+bot.callbackQuery(/^consult_(contacted|done)_\d+$/, (ctx) => handleConsultStatusCallback(ctx));
+
 bot.on("callback_query:data", (ctx) => handleIncoming(ctx));
 
 bot.catch((err) => {
@@ -55,6 +68,8 @@ async function main() {
   startAdminServer(bot.api);
   // Напоминания о заказах, которые висят дольше обещанных суток.
   startOrderReminders(bot.api);
+  // Предложение консультации со скидкой через пару минут после плана.
+  startUpsellScheduler(bot.api);
   await bot.start({
     onStart: (botInfo) => console.log(`Бот @${botInfo.username} запущен и слушает сообщения (long polling).`),
   });

@@ -93,11 +93,11 @@ const STYLES = `
   .pill.danger { background: var(--danger); color: #fff; }
   .schedule-row { display: grid; grid-template-columns: 90px 1fr 110px 32px; gap: 8px; margin-bottom: 6px; }
   /* Фиксированный блок под таблицей режима. Оформление как .sdisc в
-     прототипе PDF: мелкий приглушённый текст на кремовом фоне. */
+     прототипе PDF: светло-лавандовая плашка с акцентной полосой слева. */
   .sdisc {
-    margin-top: 14px; padding: 12px 16px; border-radius: 8px;
-    background: var(--bg); border: 1px solid #efe6d6;
-    font-size: 13px; line-height: 1.5; color: var(--muted);
+    margin-top: 14px; padding: 12px 16px; border-radius: 0 8px 8px 0;
+    background: #F6F3FB; border-left: 3px solid var(--accent);
+    font-size: 14px; line-height: 1.5; color: var(--ink);
   }
   .banner { padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; background: #e8f3e8; }
   .banner.warn { background: #FFF6E6; }

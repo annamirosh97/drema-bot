@@ -17,6 +17,8 @@ import { renderPdf } from "../pdf/render";
 import { PdfContent, ScheduleRow, ScheduleVariant } from "../paidPdf";
 import { RelaxationGroup, isRelaxationMemoReady, readRelaxationMemo } from "../prompts";
 import { OrderRow, renderOrderPage, renderOrdersPage, renderPreview } from "./pages";
+import { ConsultRow, renderConsultPage, renderConsultsPage } from "./consultPages";
+import { ConsultStatusChange, buildConsultPackage, setConsultStatus } from "../consult";
 
 // ── Авторизация ─────────────────────────────────────────────────────
 
@@ -119,7 +121,9 @@ export function startAdminServer(api: Api) {
   });
 
   // Хостинг проверяет живость сервиса по корню — отвечаем без пароля.
-  app.get("/", (_req, res) => res.send("Дрёма-бот жив. Админка — /admin/orders"));
+  app.get("/", (_req, res) =>
+    res.send("Дрёма-бот жив. Админка — /admin/orders и /admin/consults")
+  );
 
   app.get("/admin/orders", async (_req, res) => {
     const orders = await prisma.order.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
@@ -239,6 +243,83 @@ export function startAdminServer(api: Api) {
     res.redirect(`/admin/orders/${id}?regen=1`);
   });
 
+  // ── Заявки на консультацию ────────────────────────────────────────
+
+  app.get("/admin/consults", async (_req, res) => {
+    const requests = await prisma.consultRequest.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+    const rows: ConsultRow[] = requests.map((r) => ({
+      id: r.id,
+      createdAt: r.createdAt,
+      status: r.status,
+      parentUsername: r.parentUsername,
+      firstContact: r.firstContact,
+      source: r.source,
+      priceRub: r.priceRub,
+      hoursWaiting: (Date.now() - r.createdAt.getTime()) / 3_600_000,
+    }));
+    res.send(renderConsultsPage(rows));
+  });
+
+  app.get("/admin/consults/:id", async (req, res) => {
+    const request = await prisma.consultRequest.findUnique({ where: { id: Number(req.params.id) } });
+    if (!request) return res.status(404).send("Заявка не найдена.");
+
+    const [recommendation, ageAnswer] = await Promise.all([
+      prisma.recommendation.findUnique({ where: { telegramId: request.telegramId } }),
+      prisma.answer.findFirst({ where: { telegramId: request.telegramId, questionNumber: 1 } }),
+    ]);
+
+    res.send(
+      renderConsultPage({
+        id: request.id,
+        telegramId: String(request.telegramId),
+        createdAt: request.createdAt,
+        status: request.status,
+        parentUsername: request.parentUsername,
+        parentPhone: request.parentPhone,
+        contactConsentAt: request.contactConsentAt,
+        firstContact: request.firstContact,
+        contactedAt: request.contactedAt,
+        doneAt: request.doneAt,
+        priceRub: request.priceRub,
+        source: request.source,
+        orderId: request.orderId,
+        babyAge: ageAnswer?.answerText ?? "не указан",
+        questionnaire: await buildPrepText(request.telegramId),
+        analysis: recommendation?.analysis ?? "нет",
+        message1: recommendation?.message1 ?? "нет",
+        message2: recommendation?.message2 ?? "нет",
+        statusChanged: req.query.status === "1",
+      })
+    );
+  });
+
+  // Тот же .txt, что уходит специалисту в Telegram: собирается здесь же,
+  // чтобы версия в админке и в чате не разъезжались.
+  app.get("/admin/consults/:id/package", async (req, res) => {
+    const request = await prisma.consultRequest.findUnique({ where: { id: Number(req.params.id) } });
+    if (!request) return res.status(404).send("Заявка не найдена.");
+
+    res
+      .type("text/plain; charset=utf-8")
+      .setHeader("Content-Disposition", `attachment; filename=Zayavka_${request.id}.txt`);
+    res.send(await buildConsultPackage(request));
+  });
+
+  app.post("/admin/consults/:id/status", async (req, res) => {
+    const id = Number(req.params.id);
+    const status = String(req.body.status ?? "");
+    if (!["CONTACTED", "DONE", "CANCELED"].includes(status)) {
+      return res.status(400).send("Неизвестный статус.");
+    }
+
+    await setConsultStatus(id, status as ConsultStatusChange);
+    res.redirect(`/admin/consults/${id}?status=1`);
+  });
+
   // Без этого Express отдаёт в браузер стектрейс. Админке он ни к чему,
   // а в логах он останется.
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -263,4 +344,8 @@ export function startAdminServer(api: Api) {
 // не будет — лучше её отсутствие, чем битый адрес.
 export function orderUrl(orderId: number): string | null {
   return env.PUBLIC_BASE_URL ? `${env.PUBLIC_BASE_URL}/admin/orders/${orderId}` : null;
+}
+
+export function consultUrl(requestId: number): string | null {
+  return env.PUBLIC_BASE_URL ? `${env.PUBLIC_BASE_URL}/admin/consults/${requestId}` : null;
 }
