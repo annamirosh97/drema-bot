@@ -513,13 +513,15 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
   // сообщение сразу. Отбивка и черновик придут тебе в Telegram сами.
   void announceAndGenerateDraft(ctx.api, telegramId);
 
-  await replyWithOptionalPhoto(ctx, texts.questionnaireComplete, photos.questionnaireComplete);
-
-  // Гид отправляем следом и на нём анкету не роняем: она уже сдана, и
-  // если файл почему-то не ушёл, разбор человек всё равно дождётся.
-  await sendCachedDocument(ctx, projectFile(GUIDE_PDF)).catch((error) =>
-    console.error("Не удалось отправить гид после анкеты:", error)
-  );
+  // Текст идёт подписью к гиду, одним сообщением: он прямо на этот файл
+  // и указывает. Если отправить документ не вышло, шлём хотя бы текст —
+  // анкета уже сдана, и человек не должен остаться вообще без ответа.
+  try {
+    await sendCachedDocument(ctx, projectFile(GUIDE_PDF), texts.questionnaireComplete);
+  } catch (error) {
+    console.error("Не удалось отправить гид после анкеты:", error);
+    await ctx.reply(texts.questionnaireComplete);
+  }
 }
 
 // Порядок сообщений админу после подтверждения анкеты: сначала отбивка,
