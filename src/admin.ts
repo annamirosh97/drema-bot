@@ -371,14 +371,31 @@ export function registerAdminCommands(bot: Bot) {
 
   bot.command("stats", async (ctx) => {
     if (!isAdmin(ctx)) return;
-    const [total, completed, declined, events, orders, consults] = await Promise.all([
+    const [total, completed, pdRecords, events, orders, consults] = await Promise.all([
       prisma.session.count(),
       prisma.session.count({ where: { status: "completed" } }),
-      prisma.session.count({ where: { status: "declined" } }),
+      // Отказы теперь считаем по журналу согласий: кнопка «Пока не
+      // готовы» на «Условиях» убрана, и статус declined больше не
+      // проставляется — он остался только у старых сессий.
+      prisma.consentRecord.findMany({
+        where: { type: "PD_PROCESSING" },
+        orderBy: { createdAt: "desc" },
+        select: { telegramId: true, action: true },
+      }),
       prisma.offerEvent.findMany({ select: { telegramId: true, type: true } }),
       prisma.order.groupBy({ by: ["status"], _count: true }),
       prisma.consultRequest.groupBy({ by: ["status"], _count: true }),
     ]);
+
+    // Текущее состояние согласия — последняя запись по человеку, а
+    // записи пришли от новых к старым: первая встреченная и есть она.
+    const pdState = new Map<string, string>();
+    for (const record of pdRecords) {
+      const key = String(record.telegramId);
+      if (!pdState.has(key)) pdState.set(key, record.action);
+    }
+    const granted = [...pdState.values()].filter((a) => a === "GRANTED").length;
+    const declined = [...pdState.values()].filter((a) => a === "DECLINED").length;
 
     // Считаем по пользователям, а не по событиям: один человек может
     // нажать «Купить» дважды, и это всё равно одна конверсия.
@@ -416,8 +433,9 @@ export function registerAdminCommands(bot: Bot) {
 
     await ctx.reply(
       `Всего пользователей: ${total}\n` +
-        `Завершили анкету: ${completed}\n` +
-        `Отказались: ${declined}\n\n` +
+        `Дали согласие на обработку данных: ${granted}\n` +
+        `Отказались на согласии: ${declined}\n` +
+        `Завершили анкету: ${completed}\n\n` +
         `Экран выбора показан: ${shown.size}\n` +
         `Открыли карточку плана: ${pdfCard.size} (${pct(pdfCard.size, shown.size)})\n` +
         `Открыли карточку консультации: ${consultCard.size} (${pct(consultCard.size, shown.size)})\n` +

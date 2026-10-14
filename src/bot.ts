@@ -6,6 +6,8 @@ import { registerAdminCommands, handleAdminFlowMessage } from "./admin";
 import { startAdminServer } from "./web/server";
 import { startOrderReminders } from "./engine";
 import { startUpsellScheduler } from "./upsell";
+import { loadLegalDocuments } from "./legalDocs";
+import { countUsersWithoutPdConsent } from "./consents";
 
 const bot = new Bot(env.BOT_TOKEN);
 
@@ -63,6 +65,20 @@ bot.catch((err) => {
 
 async function main() {
   console.log("Дрёма-бот запускается...");
+  // Версии юридических документов нужны до первого онбординга: без них
+  // согласие не записать, поэтому поднимаемся только с ними.
+  await loadLegalDocuments();
+
+  // Сколько людей пользовались ботом до появления согласий: им экраны
+  // покажутся при следующем действии. Цифра нужна один раз, после
+  // выката, поэтому просто пишем её в лог.
+  const withoutConsent = await countUsersWithoutPdConsent();
+  console.log(
+    withoutConsent
+      ? `Пользователей без согласия на обработку данных: ${withoutConsent}. Им оба экрана покажутся при следующем действии.`
+      : "Все пользователи в базе уже отвечали на согласие об обработке данных."
+  );
+
   // Веб-админка живёт в этом же процессе. Если ADMIN_PASSWORD не задан,
   // сервер всё равно поднимается, но админка отвечает 503 с объяснением.
   startAdminServer(bot.api);

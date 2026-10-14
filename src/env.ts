@@ -10,6 +10,18 @@ function required(name: string): string {
   return value;
 }
 
+// Адрес юридического документа: либо задан явно, либо собирается из
+// публичного адреса приложения и ведёт на нашу страницу-заглушку. Если
+// публичный адрес не задан, остаётся пустым — это видно сразу, в отличие
+// от битой ссылки.
+function legalUrl(variable: string, fallbackPath: string): string {
+  const explicit = (process.env[variable] ?? "").trim();
+  if (explicit) return explicit.replace(/\/+$/, "");
+
+  const base = (process.env.PUBLIC_BASE_URL ?? "").replace(/\/+$/, "");
+  return base ? `${base}${fallbackPath}` : "";
+}
+
 export const env = {
   BOT_TOKEN: required("BOT_TOKEN"),
   DATABASE_URL: required("DATABASE_URL"),
@@ -58,6 +70,12 @@ export const env = {
   PUBLIC_BASE_URL: (process.env.PUBLIC_BASE_URL ?? "").replace(/\/+$/, ""),
   // Контакты на финальной странице PDF. Если не заданы, строки не
   // выводятся вовсе — пустое «Почта для связи:» выглядело бы небрежно.
-  OFFER_URL: process.env.OFFER_URL ?? "",
+  OFFER_URL: legalUrl("OFFER_URL", "/offer"),
   CONTACT_EMAIL: process.env.CONTACT_EMAIL ?? "",
+  // Адреса юридических документов. Пока текстов нет, по умолчанию ведут
+  // на страницы-заглушки этого же приложения — пустая ссылка в сообщении
+  // о персональных данных недопустима.
+  PRIVACY_POLICY_URL: legalUrl("PRIVACY_POLICY_URL", "/privacy"),
+  PD_CONSENT_URL: legalUrl("PD_CONSENT_URL", "/consent"),
+  MARKETING_CONSENT_URL: legalUrl("MARKETING_CONSENT_URL", "/marketing-consent"),
 };

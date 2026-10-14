@@ -23,6 +23,32 @@ export function multiChoiceKeyboard(options: string[], selected: string[]): Inli
   return kb;
 }
 
+// ── Согласия в онбординге ───────────────────────────────────────────
+//
+// Подписи кнопок уходят в журнал как есть: по записи должно быть видно,
+// на что именно нажал человек. Менять их — значит менять то, что увидит
+// проверяющая сторона в старых записях, поэтому они вынесены в
+// константы и берутся отсюда и кодом, и журналом.
+
+export const PD_CONSENT_YES = "Даю согласие";
+export const PD_CONSENT_NO = "Не сейчас";
+export const MARKETING_YES = "Да, присылайте";
+export const MARKETING_NO = "Нет, спасибо";
+
+export function pdConsentKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(PD_CONSENT_YES, "pd_consent_yes")
+    .row()
+    .text(PD_CONSENT_NO, "pd_consent_no");
+}
+
+export function marketingConsentKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(MARKETING_YES, "marketing_yes")
+    .row()
+    .text(MARKETING_NO, "marketing_no");
+}
+
 // Экран итоговой анкеты в конце: подтвердить или пойти править ответы.
 export function summaryKeyboard(): InlineKeyboard {
   return new InlineKeyboard()

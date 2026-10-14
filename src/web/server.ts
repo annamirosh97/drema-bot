@@ -19,6 +19,9 @@ import { RelaxationGroup, isRelaxationMemoReady, readRelaxationMemo } from "../p
 import { OrderRow, renderOrderPage, renderOrdersPage, renderPreview } from "./pages";
 import { ConsultRow, renderConsultPage, renderConsultsPage } from "./consultPages";
 import { ConsultStatusChange, buildConsultPackage, setConsultStatus } from "../consult";
+import type { LegalDocType } from "@prisma/client";
+import { activeDocument, readLegalText } from "../legalDocs";
+import { renderLegalPage } from "./legalPage";
 
 // ── Авторизация ─────────────────────────────────────────────────────
 
@@ -119,6 +122,26 @@ export function startAdminServer(api: Api) {
     }
     return requireAuth(req, res, next);
   });
+
+  // Юридические документы. Пока это заглушки, но адреса уже уходят
+  // людям в сообщениях о согласиях и будут лежать в журнале, поэтому
+  // отвечать по ним нужно с самого начала — и без пароля.
+  const LEGAL_PAGES: Record<string, { type: LegalDocType; title: string }> = {
+    "/privacy": { type: "PRIVACY_POLICY", title: "Политика обработки персональных данных" },
+    "/consent": { type: "PD_CONSENT", title: "Согласие на обработку персональных данных" },
+    "/marketing-consent": {
+      type: "MARKETING_CONSENT",
+      title: "Согласие на получение рекламной рассылки",
+    },
+    "/offer": { type: "OFFER", title: "Публичная оферта" },
+  };
+
+  for (const [path, { type, title }] of Object.entries(LEGAL_PAGES)) {
+    app.get(path, (_req, res) => {
+      const document = activeDocument(type);
+      res.send(renderLegalPage(title, document.version, readLegalText(type, document.version)));
+    });
+  }
 
   // Хостинг проверяет живость сервиса по корню — отвечаем без пароля.
   app.get("/", (_req, res) =>

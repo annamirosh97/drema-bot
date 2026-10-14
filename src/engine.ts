@@ -27,9 +27,16 @@ const GUIDE_PDF = "assets/guide/Drema_azbuka_sna.pdf";
 import { orderUrl } from "./web/server";
 import { QUESTIONS, QuestionDef, getFirstQuestionNumber, getNextQuestionNumber, getQuestion } from "./questions";
 import { InputFile } from "grammy";
+import { getConsent, recordConsent } from "./consents";
 import {
   CONSULT_SELF_WRITE_BUTTON,
+  MARKETING_NO,
+  MARKETING_YES,
+  PD_CONSENT_NO,
+  PD_CONSENT_YES,
   csatKeyboard,
+  marketingConsentKeyboard,
+  pdConsentKeyboard,
   editMoreKeyboard,
   exampleFollowupKeyboard,
   multiChoiceKeyboard,
@@ -96,6 +103,15 @@ export async function handleIncoming(ctx: Context) {
   // тогда его стадия с оффером не совпадёт, а кнопки окажутся мёртвыми.
   // Та же защита срабатывает, если человек пролистал чат наверх и нажал
   // кнопку под старым сообщением.
+  // Согласие на обработку данных проверяем раньше всего остального.
+  // Нажатие кнопки — такое же действие, как сообщение: человеку,
+  // который начал пользоваться ботом до появления согласий, нельзя
+  // позволить купить план по старой кнопке в истории чата, минуя
+  // согласие.
+  if (!(await allowedWithoutPdConsent(session, callbackData))) {
+    return askPdConsentFirst(ctx, session);
+  }
+
   if (callbackData?.startsWith("offer_")) {
     return handleOffer(ctx, session, callbackData);
   }
@@ -124,6 +140,10 @@ export async function handleIncoming(ctx: Context) {
   }
 
   switch (session.stage) {
+    case "PD_CONSENT":
+      return handlePdConsent(ctx, session, callbackData);
+    case "MARKETING_CONSENT":
+      return handleMarketingConsent(ctx, session, callbackData);
     case "WELCOME":
       return handleWelcome(ctx, session, callbackData);
     case "HOW_IT_WORKS":
@@ -185,34 +205,214 @@ async function handleHowItWorks(ctx: Context, session: Session, callbackData?: s
   return ctx.reply(texts.howItWorks, { reply_markup: new InlineKeyboard().text("Начать", "start") });
 }
 
+// Кнопка на «Условиях» больше не означает согласия на обработку данных:
+// за него теперь отвечает отдельный экран, и отказ тоже переехал туда.
+function termsKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("Понятно, дальше", "terms_accept");
+}
+
 async function goToTerms(ctx: Context, session: Session) {
   await prisma.session.update({ where: { telegramId: session.telegramId }, data: { stage: "TERMS" } });
-  const kb = new InlineKeyboard()
-    .text("Всё понятно, начинаем", "terms_accept")
-    .row()
-    .text("Пока не готовы", "terms_decline");
-  return ctx.reply(texts.terms, { reply_markup: kb });
+  return ctx.reply(texts.terms, { reply_markup: termsKeyboard() });
 }
 
 async function handleTerms(ctx: Context, session: Session, callbackData?: string) {
-  if (callbackData === "terms_accept") {
-    const first = getFirstQuestionNumber();
+  if (callbackData === "terms_accept") return goToPdConsent(ctx, session);
+  return ctx.reply(texts.terms, { reply_markup: termsKeyboard() });
+}
+
+// ── Согласие на обработку персональных данных ───────────────────────
+
+// Единственное сообщение бота с разметкой: адреса документов приходят
+// из переменных окружения, и в HTML они должны быть обезврежены — иначе
+// кавычка в адресе разорвёт тег.
+function pdConsentText(): string {
+  return texts.pdConsent(escapeHtml(env.PRIVACY_POLICY_URL), escapeHtml(env.PD_CONSENT_URL));
+}
+
+async function sendPdConsent(ctx: Context) {
+  return ctx.reply(pdConsentText(), {
+    parse_mode: "HTML",
+    link_preview_options: { is_disabled: true },
+    reply_markup: pdConsentKeyboard(),
+  });
+}
+
+async function goToPdConsent(ctx: Context, session: Session) {
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "PD_CONSENT" },
+  });
+  return sendPdConsent(ctx);
+}
+
+// Записываем согласие и только потом отвечаем. Не записалось — ничего
+// не делаем: согласие, которого нет в журнале, для проверяющей стороны
+// не существует, и пускать человека дальше с ним нельзя.
+async function saveConsent(ctx: Context, input: Parameters<typeof recordConsent>[0]): Promise<boolean> {
+  try {
+    await recordConsent(input);
+    return true;
+  } catch (error) {
+    console.error(`Не удалось записать согласие ${input.type} для #${input.telegramId}:`, error);
+    await ctx.reply(texts.consentSaveFailed).catch(() => {});
+    return false;
+  }
+}
+
+async function handlePdConsent(ctx: Context, session: Session, callbackData?: string) {
+  if (callbackData === "pd_consent_yes" || callbackData === "pd_consent_no") {
+    const granted = callbackData === "pd_consent_yes";
+    const saved = await saveConsent(ctx, {
+      telegramId: session.telegramId,
+      type: "PD_PROCESSING",
+      action: granted ? "GRANTED" : "DECLINED",
+      source: "ONBOARDING",
+      documents: ["PRIVACY_POLICY", "PD_CONSENT"],
+      messageText: pdConsentText(),
+      buttonText: granted ? PD_CONSENT_YES : PD_CONSENT_NO,
+      telegramMessageId: ctx.callbackQuery?.message?.message_id,
+    });
+    if (!saved) return;
+
+    await dropKeyboard(ctx);
+    if (granted) return goToMarketingConsent(ctx, session);
+
+    // Стадию не меняем: /start после отказа должен вернуть к этому же
+    // экрану, а не показывать приветствие заново.
+    return ctx.reply(texts.pdConsentDeclined);
+  }
+
+  // Нажали кнопку старого сообщения или написали текстом — показываем
+  // экран ещё раз: без согласия дальше всё равно нельзя.
+  return sendPdConsent(ctx);
+}
+
+// ── Согласие на рекламную рассылку ──────────────────────────────────
+
+function marketingConsentText(): string {
+  return texts.marketingConsent(env.MARKETING_CONSENT_URL);
+}
+
+async function sendMarketingConsent(ctx: Context) {
+  return ctx.reply(marketingConsentText(), {
+    link_preview_options: { is_disabled: true },
+    reply_markup: marketingConsentKeyboard(),
+  });
+}
+
+async function goToMarketingConsent(ctx: Context, session: Session) {
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "MARKETING_CONSENT" },
+  });
+  return sendMarketingConsent(ctx);
+}
+
+async function handleMarketingConsent(ctx: Context, session: Session, callbackData?: string) {
+  if (callbackData === "marketing_yes" || callbackData === "marketing_no") {
+    const granted = callbackData === "marketing_yes";
+    const saved = await saveConsent(ctx, {
+      telegramId: session.telegramId,
+      type: "MARKETING",
+      action: granted ? "GRANTED" : "DECLINED",
+      source: "ONBOARDING",
+      documents: ["MARKETING_CONSENT"],
+      messageText: marketingConsentText(),
+      buttonText: granted ? MARKETING_YES : MARKETING_NO,
+      telegramMessageId: ctx.callbackQuery?.message?.message_id,
+    });
+    if (!saved) return;
+
+    await dropKeyboard(ctx);
+    // Отказ от рассылки ни на что, кроме рассылок, не влияет: дальше
+    // оба ответа ведут одинаково.
+    return afterConsents(ctx, session);
+  }
+
+  return sendMarketingConsent(ctx);
+}
+
+// Куда идти после согласий: новичок начинает анкету, а тот, кому экраны
+// показали посреди сценария, возвращается туда, где его прервали.
+async function afterConsents(ctx: Context, session: Session) {
+  const resume = session.resumeStage;
+  if (resume) {
     await prisma.session.update({
       where: { telegramId: session.telegramId },
-      data: { stage: "QUESTION", status: "in_progress", currentQuestionNumber: first },
+      data: { stage: resume, resumeStage: null },
     });
-    await replyWithOptionalPhoto(ctx, texts.goStart, photos.goStart);
-    return sendQuestionPrompt(ctx, getQuestion(first), []);
+    return;
   }
-  if (callbackData === "terms_decline") {
-    await prisma.session.update({ where: { telegramId: session.telegramId }, data: { stage: "DECLINE_REASON" } });
-    return ctx.reply(texts.declineReasonPrompt);
-  }
-  const kb = new InlineKeyboard()
-    .text("Всё понятно, начинаем", "terms_accept")
-    .row()
-    .text("Пока не готовы", "terms_decline");
-  return ctx.reply(texts.terms, { reply_markup: kb });
+
+  return startQuestionnaire(ctx, session);
+}
+
+async function startQuestionnaire(ctx: Context, session: Session) {
+  const first = getFirstQuestionNumber();
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "QUESTION", status: "in_progress", currentQuestionNumber: first },
+  });
+  await replyWithOptionalPhoto(ctx, texts.goStart, photos.goStart);
+  return sendQuestionPrompt(ctx, getQuestion(first), []);
+}
+
+// ── Запрет на всё, пока нет согласия на обработку данных ────────────
+
+// Стадии самого онбординга: на них согласие как раз и спрашивается.
+const ONBOARDING_STAGES: Session["stage"][] = [
+  "WELCOME",
+  "HOW_IT_WORKS",
+  "TERMS",
+  "PD_CONSENT",
+  "MARKETING_CONSENT",
+];
+
+// Кнопки онбординга. Всё, что не отсюда, без согласия не работает —
+// включая кнопки под старыми сообщениями выше по чату.
+const ONBOARDING_CALLBACKS = new Set([
+  "start",
+  "how_it_works",
+  "terms_accept",
+  "pd_consent_yes",
+  "pd_consent_no",
+  "marketing_yes",
+  "marketing_no",
+]);
+
+async function allowedWithoutPdConsent(
+  session: Session,
+  callbackData?: string
+): Promise<boolean> {
+  const status = await getConsent(session.telegramId, "PD_PROCESSING");
+  if (status.action === "GRANTED") return true;
+
+  // Идёт сам онбординг — пропускаем: согласие спросят на его шаге.
+  // Отказ и отзыв сюда тоже попадают: человек остаётся на экране
+  // согласия и может передумать.
+  return (
+    ONBOARDING_STAGES.includes(session.stage) &&
+    (!callbackData || ONBOARDING_CALLBACKS.has(callbackData))
+  );
+}
+
+// Показываем экран согласия и запоминаем, куда вернуть человека. Это
+// случай тех, кто начал пользоваться ботом до того, как согласия
+// появились: их прервали посреди сценария.
+async function askPdConsentFirst(ctx: Context, session: Session) {
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: {
+      stage: "PD_CONSENT",
+      // Если человек уже стоит на экране согласия, возвращать его
+      // некуда — иначе после ответа он попал бы сюда же по кругу.
+      resumeStage: ONBOARDING_STAGES.includes(session.stage)
+        ? session.resumeStage
+        : session.stage,
+    },
+  });
+  return sendPdConsent(ctx);
 }
 
 async function handleDeclineReason(ctx: Context, session: Session, messageText?: string) {
@@ -903,6 +1103,7 @@ export async function handleResetCommand(ctx: Context) {
       stage: "WELCOME",
       status: "onboarding",
       currentQuestionNumber: null,
+      resumeStage: null,
       tempSelections: [],
       yellowFlags: [],
     },

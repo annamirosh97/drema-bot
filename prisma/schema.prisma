@@ -19,7 +19,9 @@ enum Stage {
   WELCOME // показано приветствие, ждём "Начать" / "Как я работаю"
   HOW_IT_WORKS // показано "Как я работаю", ждём "Начать"
   TERMS // показаны условия, ждём согласие/отказ
-  DECLINE_REASON // ждём текст причины отказа
+  DECLINE_REASON // ждём текст причины отказа (прежний отказ на «Условиях», новым не выдаётся)
+  PD_CONSENT // показано согласие на обработку данных, ждём ответ
+  MARKETING_CONSENT // показан вопрос про рассылку, ждём ответ
   QUESTION // идёт анкета, см. currentQuestionNumber
   SUMMARY_REVIEW // показана итоговая анкета, ждём «Подтвердить» / «Внести изменения»
   EDIT_PICK_QUESTION // ждём номер вопроса, который пользователь хочет изменить
@@ -58,6 +60,11 @@ model Session {
   stage               Stage         @default(WELCOME)
   status              SessionStatus @default(onboarding)
   currentQuestionNumber Float?      // заполнено, когда stage = QUESTION
+  // Куда вернуть человека после согласий. Заполняется только у тех, кто
+  // начал пользоваться ботом до того, как согласия появились: им экраны
+  // показываются посреди сценария, и после ответа нужно вернуть их туда,
+  // где они были.
+  resumeStage         Stage?
   tempSelections      String[]      @default([]) // текущие выбранные варианты multi_choice (до "Готово")
   yellowFlags         String[]      @default([]) // накопленные жёлтые флаги для ручной проверки
   createdAt           DateTime      @default(now())
@@ -191,6 +198,86 @@ model PdfDraft {
   approvedAt    DateTime?
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+// ── Согласия ────────────────────────────────────────────────────────
+//
+// Журнал, а не флажки: каждое действие пользователя — новая строка,
+// строки никогда не меняются и не удаляются. Текущее состояние согласия
+// — это последняя запись его типа. Так по любому пользователю можно
+// показать всю историю: когда, на какую версию документа, каким текстом
+// и какой кнопкой дано или отозвано согласие.
+
+enum LegalDocType {
+  PRIVACY_POLICY
+  PD_CONSENT
+  MARKETING_CONSENT
+  OFFER
+}
+
+// Версия юридического документа. Текст лежит в репозитории, в
+// legal/<тип>/<версия>.md, и его хэш записан здесь: по старой записи
+// журнала всегда видно, какой именно текст человек видел.
+model LegalDocument {
+  id            Int          @id @default(autoincrement())
+  type          LegalDocType
+  version       String // например «draft-1» или «2026-10-14»
+  url           String
+  sha256        String // хэш файла с текстом документа
+  effectiveFrom DateTime     @db.Timestamptz(3)
+  createdAt     DateTime     @default(now()) @db.Timestamptz(3)
+
+  @@unique([type, version])
+  @@index([type, effectiveFrom])
+}
+
+enum ConsentType {
+  PD_PROCESSING
+  MARKETING
+  OFFER_ACCEPTANCE
+  SPECIALIST_TRANSFER
+}
+
+enum ConsentAction {
+  GRANTED
+  DECLINED
+  REVOKED
+}
+
+enum ConsentSource {
+  ONBOARDING
+  PURCHASE_PDF
+  CONSULT_SIGNUP
+  UPSELL
+  DATA_COMMAND
+  UNSUBSCRIBE_COMMAND
+  ADMIN
+}
+
+// Запись журнала. Только добавление: UPDATE и DELETE по этой таблице
+// отклоняет триггер в базе (см. миграцию), а в коде есть только create.
+//
+// Внешнего ключа на Session намеренно нет: журнал должен пережить
+// удаление данных пользователя, а каскад унёс бы его вместе с сессией.
+model ConsentRecord {
+  id         Int           @id @default(autoincrement())
+  telegramId BigInt
+  type       ConsentType
+  action     ConsentAction
+  source     ConsentSource
+  // Документы, показанные в момент действия: для ПД это и политика, и
+  // само согласие, поэтому список, а не одна ссылка.
+  documentIds Int[]        @default([])
+  // Точный текст, который видел человек, и кнопка, которую он нажал.
+  messageText       String
+  buttonText        String
+  telegramMessageId Int?
+  relatedOrderId          Int?
+  relatedConsultRequestId Int?
+  createdAt               DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([telegramId, type, createdAt])
+  @@index([type, action])
 }
 
 // Воронка оффера: показ экрана выбора, открытие карточек, возврат
