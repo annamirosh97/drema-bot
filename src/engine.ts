@@ -11,12 +11,14 @@ import {
 import { PaidRedFlagError, PdfContent, generatePdfDraft } from "./paidPdf";
 import { renderPdf } from "./pdf/render";
 import { PROJECT_ROOT, isRelaxationMemoReady, readRelaxationMemo } from "./prompts";
+import { projectFile, sendCachedDocument } from "./staticDocs";
+
+// Гид «Азбука сна» — уходит каждому сразу после анкеты, пока готовится разбор.
+const GUIDE_PDF = "assets/guide/Drema_azbuka_sna.pdf";
 import { orderUrl } from "./web/server";
 import { QUESTIONS, QuestionDef, getFirstQuestionNumber, getNextQuestionNumber, getQuestion } from "./questions";
 import { InputFile } from "grammy";
 import { join } from "path";
-import { createHash } from "crypto";
-import { readFileSync } from "fs";
 import {
   csatKeyboard,
   editMoreKeyboard,
@@ -511,7 +513,13 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
   // сообщение сразу. Отбивка и черновик придут тебе в Telegram сами.
   void announceAndGenerateDraft(ctx.api, telegramId);
 
-  return replyWithOptionalPhoto(ctx, texts.questionnaireComplete, photos.questionnaireComplete);
+  await replyWithOptionalPhoto(ctx, texts.questionnaireComplete, photos.questionnaireComplete);
+
+  // Гид отправляем следом и на нём анкету не роняем: она уже сдана, и
+  // если файл почему-то не ушёл, разбор человек всё равно дождётся.
+  await sendCachedDocument(ctx, projectFile(GUIDE_PDF)).catch((error) =>
+    console.error("Не удалось отправить гид после анкеты:", error)
+  );
 }
 
 // Порядок сообщений админу после подтверждения анкеты: сначала отбивка,
@@ -876,24 +884,7 @@ async function handleAwaitingRecommendation(ctx: Context, session: Session, mess
 
 // ── Оффер платного PDF ──────────────────────────────────────────────
 
-const EXAMPLE_PDF_PATH = join(PROJECT_ROOT, "assets/example/Drema_plan_sna_primer.pdf");
-
-// Telegram разрешает переотправлять уже загруженный файл по
-// идентификатору, не загружая его заново. Храним идентификатор вместе с
-// хэшем содержимого: если пример в репозитории заменили, хэш разойдётся
-// и файл уйдёт на загрузку заново.
-//
-// Сам кэш живёт в памяти процесса и перезапуск не переживает, так что
-// после деплоя новый пример подхватится и без проверки хэша. Хэш нужен
-// на случай подмены файла без перезапуска и чтобы правило осталось
-// явным, если кэш когда-нибудь переедет в базу.
-let exampleCache: { fileId: string; hash: string } | null = null;
-
-// Файл около 800 КБ, а кнопку нажимают редко — читать и хэшировать его
-// на каждое нажатие дешевле, чем держать хэш и не замечать подмену.
-function exampleFileHash(): string {
-  return createHash("sha256").update(readFileSync(EXAMPLE_PDF_PATH)).digest("hex");
-}
+const EXAMPLE_PDF = "assets/example/Drema_plan_sna_primer.pdf";
 
 function exampleFollowUp(ctx: Context) {
   return ctx.reply(texts.exampleFollowup, {
@@ -902,24 +893,7 @@ function exampleFollowUp(ctx: Context) {
 }
 
 async function sendExamplePdf(ctx: Context) {
-  const hash = exampleFileHash();
-
-  if (exampleCache?.hash === hash) {
-    try {
-      await ctx.replyWithDocument(exampleCache.fileId);
-      return exampleFollowUp(ctx);
-    } catch (error) {
-      // Идентификатор мог устареть на стороне Telegram. Родителю эта
-      // ошибка ни о чём не говорит — просто грузим файл заново.
-      console.error("Не удалось отправить пример по file_id, загружаю заново:", error);
-      exampleCache = null;
-    }
-  }
-
-  const sent = await ctx.replyWithDocument(new InputFile(EXAMPLE_PDF_PATH));
-  const fileId = sent.document?.file_id;
-  if (fileId) exampleCache = { fileId, hash };
-
+  await sendCachedDocument(ctx, projectFile(EXAMPLE_PDF));
   return exampleFollowUp(ctx);
 }
 
