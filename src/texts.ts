@@ -6,6 +6,9 @@
 // анкеты живут не здесь, а в поле photoUrl в questions.ts.
 export const photos = {
   goStart: "https://lh3.googleusercontent.com/d/13QrZzZJ-g6Dd6qleotIWZ4Nv7h9wmEX8",
+  // Приходит отдельным сообщением, без подписи: текст про гид уходит
+  // вместе с самим файлом, следующим сообщением.
+  questionnaireComplete: "https://lh3.googleusercontent.com/d/12QvjcR_tEhGtiFyp3FP3UfoS4Uo94EBe",
 };
 
 export const texts = {
