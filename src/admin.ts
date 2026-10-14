@@ -9,6 +9,8 @@ import {
   regenerateForAdmin,
   keepLastRegen,
   sendOfferTo,
+  createPdfOrder,
+  runPdfGeneration,
 } from "./engine";
 import { formatUsd } from "./claudeApi";
 import { orderUrl } from "./web/server";
@@ -247,6 +249,40 @@ export function registerAdminCommands(bot: Bot) {
     await ctx.reply(
       `Готово: проба стала черновиком для #${telegramId}.\n\nОтправить: /approve ${telegramId}`
     );
+  });
+
+  // Создать заказ PDF вручную, в обход проверки «у этого пользователя
+  // заказ уже есть». Нужна для тестов: пройти анкету заново со своего
+  // аккаунта и получить план по новым ответам, не трогая прежний заказ.
+  // Прежний заказ остаётся в истории как есть.
+  bot.command("pdf", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const telegramId = parseTelegramId(ctx.match?.toString());
+    if (telegramId === null) return ctx.reply("Использование: /pdf <telegram_id>");
+
+    const session = await prisma.session.findUnique({ where: { telegramId } });
+    if (!session) return ctx.reply("Такого пользователя нет в базе.");
+
+    const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+    if (!recommendation?.analysis || !recommendation.message1 || !recommendation.message2) {
+      return ctx.reply(
+        `У #${telegramId} нет готового разбора — план собирать не из чего.\n\n` +
+          `Он строится на выводах анализа и двух отправленных сообщениях: ` +
+          `сначала /draft ${telegramId}, затем /approve ${telegramId}.`
+      );
+    }
+
+    const previous = await prisma.order.count({ where: { telegramId } });
+    const order = await createPdfOrder(telegramId);
+
+    await ctx.reply(
+      `Заказ PDF #${order.id} создан, собираю план по текущим ответам анкеты.` +
+        (previous ? `\n\nПрежних заказов у этого пользователя: ${previous}, их не трогаю.` : "")
+    );
+
+    // Результата не ждём: два обращения к модели идут минуты, а бот
+    // обрабатывает сообщения по одному.
+    void runPdfGeneration(bot.api, order.id);
   });
 
   // Отправить оффер вручную — тому, кто его пропустил или потерял в
