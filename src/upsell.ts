@@ -15,6 +15,7 @@ import { prisma } from "./prisma";
 import { env } from "./env";
 import { formatPrice, texts } from "./texts";
 import { startConsultRequest } from "./consult";
+import { replyStatic, sendStatic } from "./send";
 import {
   upsellCardKeyboard,
   upsellExpiredKeyboard,
@@ -144,8 +145,9 @@ async function sendUpsell(api: Api, orderId: number, telegramId: bigint) {
     },
   });
 
-  const message = await api.sendMessage(
-    Number(session.chatId),
+  const message = await sendStatic(
+    api,
+    session.chatId,
     texts.upsellOffer(price(), fullPrice(offer), formatOfferDate(offer.expiresAt)),
     { reply_markup: upsellOfferKeyboard(price()) }
   );
@@ -176,10 +178,10 @@ async function logUpsellEvent(telegramId: bigint, type: UpsellEvent) {
 // сообщение, а если не дали — отправляем новым.
 async function replaceWithCard(ctx: Context, text: string, markup: InlineKeyboard) {
   try {
-    await ctx.editMessageText(text, { reply_markup: markup });
+    await ctx.editMessageText(text, { reply_markup: markup, parse_mode: "HTML" });
   } catch (error) {
     if (String(error).includes("message is not modified")) return;
-    await ctx.reply(text, { reply_markup: markup });
+    await replyStatic(ctx, text, { reply_markup: markup });
   }
 }
 
@@ -215,7 +217,7 @@ export async function handleUpsell(ctx: Context, session: Session, callbackData:
 async function handleUpsellSignup(ctx: Context, session: Session, offer: UpsellOffer) {
   if (Date.now() > offer.expiresAt.getTime()) {
     await logUpsellEvent(session.telegramId, "upsell_expired_click");
-    return ctx.reply(texts.upsellExpired, {
+    return replyStatic(ctx, texts.upsellExpired, {
       reply_markup: upsellExpiredKeyboard(fullPrice(offer)),
     });
   }
@@ -251,5 +253,5 @@ async function handleUpsellDecline(
 
   await prisma.upsellOffer.update({ where: { id: offer.id }, data: { declinedAt: new Date() } });
   await logUpsellEvent(session.telegramId, "upsell_declined");
-  return ctx.reply(texts.upsellDeclined(date));
+  return replyStatic(ctx, texts.upsellDeclined(date));
 }

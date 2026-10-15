@@ -2,6 +2,7 @@ import { Bot, Context } from "grammy";
 import { prisma } from "./prisma";
 import { env } from "./env";
 import {
+  ONBOARDING_FUNNEL,
   deliverRecommendation,
   buildPrepText,
   sendApprovedRecommendation,
@@ -66,6 +67,71 @@ export function groupIntoRuns<T extends ApiCallRow>(callsNewestFirst: T[]): T[][
   }
 
   return runs;
+}
+
+// ── Воронка онбординга ──────────────────────────────────────────────
+
+const FUNNEL_DAYS = 14;
+
+// Подписи шагов. Порядок берём из ONBOARDING_FUNNEL в engine.ts, чтобы
+// он жил в одном месте, а здесь — только человеческие названия.
+const FUNNEL_LABELS: Record<string, string> = {
+  onb_welcome: "Приветствие",
+  onb_welcome_value: "Что вы получите",
+  onb_terms: "Условия и здоровье",
+  onb_pd_consent: "Согласие на данные",
+  onb_marketing: "Рассылка",
+  onb_go: "Погнали",
+  quiz_q1: "Первый вопрос",
+  quiz_completed: "Анкета завершена",
+};
+
+interface FunnelEvent {
+  telegramId: bigint;
+  type: string;
+}
+
+// Шаги считаем по уникальным людям: один человек, нажавший /start
+// дважды, — это по-прежнему один дошедший.
+//
+// Проценты два: от предыдущего шага (где именно теряем) и от начала
+// (сколько доходит в сумме). Шаг, которого в сценарии нет (экран
+// здоровья или согласия до их появления), пропускаем — иначе нулевая
+// строка обнулила бы всю воронку после себя.
+export function buildOnboardingFunnel(events: FunnelEvent[], days: number): string {
+  const usersBy = (type: string) =>
+    new Set(events.filter((e) => e.type === type).map((e) => String(e.telegramId)));
+
+  const pct = (part: number, whole: number) =>
+    whole ? `${Math.round((part / whole) * 100)}%` : "—";
+
+  const steps = ONBOARDING_FUNNEL.map((type) => ({ type, users: usersBy(type).size })).filter(
+    (step, index) => index === 0 || step.users > 0
+  );
+
+  const first = steps[0]?.users ?? 0;
+  if (!first) return `Онбординг за ${days} дн.: показов приветствия не было.`;
+
+  const lines = steps.map((step, index) => {
+    const previous = index === 0 ? step.users : steps[index - 1].users;
+    const label = FUNNEL_LABELS[step.type] ?? step.type;
+    const share =
+      index === 0
+        ? ""
+        : ` (${pct(step.users, previous)} от предыдущего, ${pct(step.users, first)} от начала)`;
+    return `  ${label}: ${step.users}${share}`;
+  });
+
+  // «Как я работаю» — не шаг воронки, а необязательная развилка: его
+  // открывают не все, и считать это потерей неправильно.
+  const howItWorks = usersBy("onb_how_it_works").size;
+  const guide = usersBy("guide_sent").size;
+
+  return (
+    `Онбординг за ${days} дн.:\n${lines.join("\n")}\n` +
+    `  — «Как я работаю» открыли: ${howItWorks} (${pct(howItWorks, first)} от начала)\n` +
+    `  — азбуку получили: ${guide}`
+  );
 }
 
 interface SendFlowState {
@@ -371,7 +437,14 @@ export function registerAdminCommands(bot: Bot) {
 
   bot.command("stats", async (ctx) => {
     if (!isAdmin(ctx)) return;
-    const [total, completed, pdRecords, events, orders, consults, healthExitRows] =
+
+    // Воронку онбординга смотрим за период: по умолчанию две недели,
+    // иначе первые дни пилота перевешивают всё остальное.
+    // Аргумент — число дней: /stats 30.
+    const days = Math.max(1, Number(ctx.match?.toString().trim()) || FUNNEL_DAYS);
+    const since = new Date(Date.now() - days * 24 * 3_600_000);
+
+    const [total, completed, pdRecords, events, orders, consults, healthExitRows, funnelEvents] =
       await Promise.all([
       prisma.session.count(),
       prisma.session.count({ where: { status: "completed" } }),
@@ -393,6 +466,10 @@ export function registerAdminCommands(bot: Bot) {
           name: "health_screen_exit",
           day: { gte: new Date(Date.now() - 30 * 24 * 3_600_000) },
         },
+      }),
+      prisma.offerEvent.findMany({
+        where: { createdAt: { gte: since } },
+        select: { telegramId: true, type: true },
       }),
     ]);
 
@@ -443,7 +520,8 @@ export function registerAdminCommands(bot: Bot) {
       rows.map((row) => `  ${row.status}: ${row._count}`).join("\n") || `  ${empty}`;
 
     await ctx.reply(
-      `Всего пользователей: ${total}\n` +
+      buildOnboardingFunnel(funnelEvents, days) +
+        `\n\nВсего пользователей: ${total}\n` +
         `Дали согласие на обработку данных: ${granted}\n` +
         `Отказались на согласии: ${declined}\n` +
         `Ушли с экрана здоровья за 30 дней: ${healthExits}\n` +

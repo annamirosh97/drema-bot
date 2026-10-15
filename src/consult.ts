@@ -17,6 +17,7 @@ import { env } from "./env";
 import { formatPrice, texts } from "./texts";
 import { buildPrepText } from "./prep";
 import { consultConsentKeyboard } from "./keyboards";
+import { escapeHtml, replyStatic } from "./send";
 
 // Заявки в этих статусах считаются живыми: пока такая есть, вторую не
 // создаём. DONE и CANCELED не мешают записаться заново.
@@ -100,7 +101,7 @@ export async function startConsultRequest(
     orderBy: { createdAt: "desc" },
   });
   if (existing) {
-    await ctx.reply(texts.consultAlreadyExists(env.SPECIALIST_USERNAME));
+    await replyStatic(ctx, texts.consultAlreadyExists(escapeHtml(env.SPECIALIST_USERNAME)));
     return null;
   }
 
@@ -113,7 +114,7 @@ export async function startConsultRequest(
       where: { id: request.id },
       data: { firstContact: "PARENT" },
     });
-    await ctx.reply(texts.consultAcceptedNoUsername(env.SPECIALIST_USERNAME, request.id));
+    await replyStatic(ctx, texts.consultAcceptedNoUsername(escapeHtml(env.SPECIALIST_USERNAME), request.id));
     await sendConsultPackage(ctx.api, request.id);
     return request;
   }
@@ -122,7 +123,7 @@ export async function startConsultRequest(
     where: { telegramId: session.telegramId },
     data: { stage: "CONSULT_CONSENT" },
   });
-  await ctx.reply(texts.consultConsent, { reply_markup: consultConsentKeyboard() });
+  await replyStatic(ctx, texts.consultConsent, { reply_markup: consultConsentKeyboard() });
   return request;
 }
 
@@ -156,7 +157,7 @@ export async function takeConsultContact(
   // Переслать можно контакт любого человека из своей книги. Чужой номер
   // специалисту не нужен и согласием не является.
   if (contact.user_id == null || BigInt(contact.user_id) !== session.telegramId) {
-    await ctx.reply(texts.consultContactNotYours, { reply_markup: consultConsentKeyboard() });
+    await replyStatic(ctx, texts.consultContactNotYours, { reply_markup: consultConsentKeyboard() });
     return true;
   }
 
@@ -174,7 +175,7 @@ export async function takeConsultContact(
 
   // remove_keyboard — чтобы клавиатура согласия не висела внизу чата
   // после того, как выбор сделан.
-  await ctx.reply(texts.consultAccepted(env.SPECIALIST_USERNAME), {
+  await replyStatic(ctx, texts.consultAccepted(escapeHtml(env.SPECIALIST_USERNAME)), {
     reply_markup: { remove_keyboard: true },
   });
   await sendConsultPackage(ctx.api, request.id);
@@ -193,7 +194,7 @@ export async function takeConsultSelfWrite(ctx: Context, session: Session): Prom
   });
   await leaveConsentStage(session.telegramId, session.stage);
 
-  await ctx.reply(texts.consultSelfWrite(env.SPECIALIST_USERNAME, request.id), {
+  await replyStatic(ctx, texts.consultSelfWrite(escapeHtml(env.SPECIALIST_USERNAME), request.id), {
     reply_markup: { remove_keyboard: true },
   });
   await sendConsultPackage(ctx.api, request.id);
@@ -211,10 +212,10 @@ const nudged = new Set<string>();
 
 export async function remindAboutConsentOnce(ctx: Context, session: Session) {
   const key = String(session.telegramId);
-  if (nudged.has(key)) return ctx.reply(texts.genericFallback);
+  if (nudged.has(key)) return replyStatic(ctx, texts.genericFallback);
 
   nudged.add(key);
-  return ctx.reply(texts.consultConsent, { reply_markup: consultConsentKeyboard() });
+  return replyStatic(ctx, texts.consultConsent, { reply_markup: consultConsentKeyboard() });
 }
 
 // ── Пакет заявки для админа и специалиста ───────────────────────────

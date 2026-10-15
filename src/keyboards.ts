@@ -30,6 +30,19 @@ export function multiChoiceKeyboard(options: string[], selected: string[]): Inli
 // проверяющая сторона в старых записях, поэтому они вынесены в
 // константы и берутся отсюда и кодом, и журналом.
 
+// ── Приветствие ─────────────────────────────────────────────────────
+//
+// Два шага: первое сообщение знакомит и ведёт ко второму, второе
+// отвечает «что вы получите» и уже предлагает начать.
+
+export function welcomeKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("Что я получу?", "welcome_value");
+}
+
+export function welcomeValueKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("Начать", "start").row().text("Как я работаю", "how_it_works");
+}
+
 export const HEALTH_OK = "Ничего из этого нет, продолжить";
 export const HEALTH_STOP = "Есть что-то из списка";
 

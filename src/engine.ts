@@ -3,6 +3,7 @@ import { prisma } from "./prisma";
 import { env } from "./env";
 import { formatPrice, photos, texts } from "./texts";
 import { buildPrepText, safeGetQuestion } from "./prep";
+import { replyPhotoStatic, replyStatic, sendStatic } from "./send";
 import {
   remindAboutConsentOnce,
   remindAboutStuckConsults,
@@ -56,6 +57,8 @@ import {
   offerPdfCardKeyboard,
   singleChoiceKeyboard,
   summaryKeyboard,
+  welcomeKeyboard,
+  welcomeValueKeyboard,
 } from "./keyboards";
 import type { Session } from "@prisma/client";
 
@@ -155,18 +158,23 @@ export async function handleIncoming(ctx: Context) {
   if (callbackData === "health_guide") return sendHealthGuide(ctx);
 
   switch (session.stage) {
+    case "TERMS_HEALTH":
+      return handleTermsHealth(ctx, session, callbackData);
+    // Сессии, заведённые до объединения экранов: переводим на новый,
+    // не теряя людей посреди онбординга.
+    case "TERMS":
     case "HEALTH_SCREEN":
-      return handleHealthScreen(ctx, session, callbackData);
+      return goToTermsHealth(ctx, session);
     case "PD_CONSENT":
       return handlePdConsent(ctx, session, callbackData);
     case "MARKETING_CONSENT":
       return handleMarketingConsent(ctx, session, callbackData);
     case "WELCOME":
-      return handleWelcome(ctx, session, callbackData);
+      return handleWelcome(ctx, session, callbackData, messageText);
+    case "WELCOME_VALUE":
+      return handleWelcomeValue(ctx, session, callbackData);
     case "HOW_IT_WORKS":
       return handleHowItWorks(ctx, session, callbackData);
-    case "TERMS":
-      return handleTerms(ctx, session, callbackData);
     case "DECLINE_REASON":
       return handleDeclineReason(ctx, session, messageText);
     case "QUESTION":
@@ -190,7 +198,7 @@ export async function handleIncoming(ctx: Context) {
     case "CSAT_FEEDBACK":
       return handleCsatFeedback(ctx, session, messageText);
     case "CSAT_DONE":
-      return ctx.reply(texts.csatThankYou);
+      return replyStatic(ctx, texts.csatThankYou);
     case "DECLINED":
     case "OUT_OF_RANGE":
     case "RED_FLAG_ENDED":
@@ -198,44 +206,115 @@ export async function handleIncoming(ctx: Context) {
   }
 }
 
+// ── Воронка онбординга ──────────────────────────────────────────────
+
+// Шаги онбординга по порядку. Этот же порядок рисуется в /stats, так
+// что менять его нужно здесь, а не в двух местах.
+export const ONBOARDING_FUNNEL = [
+  "onb_welcome",
+  "onb_welcome_value",
+  // Условия и здоровье — один экран с 15.10.2026, поэтому и шаг один.
+  // Значение onb_health осталось в enum ради записей, сделанных раньше.
+  "onb_terms",
+  "onb_pd_consent",
+  "onb_marketing",
+  "onb_go",
+  "quiz_q1",
+  "quiz_completed",
+] as const;
+
+type OnboardingEvent = OfferEventName;
+
+async function hasOnboardingEvent(telegramId: number | bigint, type: OnboardingEvent) {
+  const existing = await prisma.offerEvent.findFirst({
+    where: { telegramId: BigInt(telegramId), type },
+  });
+  return existing !== null;
+}
+
+// Событие показа экрана. Пишется один раз на человека: в /stats шаги
+// считаются по уникальным людям, поэтому повторные проходы воронку
+// всё равно не раздувают, а таблица не растёт от каждого /start.
+//
+// Сбой записи не должен мешать человеку идти дальше — это статистика.
+async function logOnboarding(telegramId: number | bigint, type: OnboardingEvent) {
+  try {
+    if (await hasOnboardingEvent(telegramId, type)) return;
+    await prisma.offerEvent.create({ data: { telegramId: BigInt(telegramId), type } });
+  } catch (error) {
+    console.error(`Не удалось записать шаг онбординга ${type}:`, error);
+  }
+}
+
 // ── Онбординг ────────────────────────────────────────────────────────
 
-function welcomeKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("Начать", "start").row().text("Как я работаю", "how_it_works");
-}
-
 async function sendWelcome(ctx: Context) {
-  return ctx.reply(texts.welcome, { reply_markup: welcomeKeyboard() });
+  await logOnboarding(ctx.from!.id, "onb_welcome");
+  return replyStatic(ctx, texts.welcome, { reply_markup: welcomeKeyboard() });
 }
 
-async function handleWelcome(ctx: Context, session: Session, callbackData?: string) {
-  if (callbackData === "start") return goToTerms(ctx, session);
-  if (callbackData === "how_it_works") {
-    await prisma.session.update({ where: { telegramId: session.telegramId }, data: { stage: "HOW_IT_WORKS" } });
-    return ctx.reply(texts.howItWorks, { reply_markup: new InlineKeyboard().text("Начать", "start") });
-  }
-  return sendWelcome(ctx);
+async function sendWelcomeValue(ctx: Context) {
+  await logOnboarding(ctx.from!.id, "onb_welcome_value");
+  return replyStatic(ctx, texts.welcomeValue, { reply_markup: welcomeValueKeyboard() });
+}
+
+async function goToWelcomeValue(ctx: Context, session: Session) {
+  // Кнопку первого сообщения убираем, чтобы на неё не нажали второй раз.
+  await dropKeyboard(ctx);
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "WELCOME_VALUE" },
+  });
+  return sendWelcomeValue(ctx);
+}
+
+async function handleWelcome(
+  ctx: Context,
+  session: Session,
+  callbackData?: string,
+  messageText?: string
+) {
+  if (callbackData === "welcome_value") return goToWelcomeValue(ctx, session);
+
+  // /start всегда показывает первый экран: по нему человек и приходит
+  // знакомиться, в том числе тот, кто застал прежнее приветствие.
+  if (messageText === "/start") return sendWelcome(ctx);
+
+  // Кнопки прежнего приветствия: до 15.10.2026 они висели на первом
+  // сообщении, и в чатах они остались. Пусть работают.
+  if (callbackData === "start") return goToTermsHealth(ctx, session);
+  if (callbackData === "how_it_works") return goToHowItWorks(ctx, session);
+
+  // Написал текстом вместо нажатия. Обычно повторяем текущий шаг, но
+  // тому, кто нового приветствия ещё не видел, показываем сразу второе
+  // сообщение: он застал прежнее, где кнопки «Начать» и «Как я работаю»
+  // висели на первом, и ждёт именно их.
+  if (await hasOnboardingEvent(ctx.from!.id, "onb_welcome")) return sendWelcome(ctx);
+  return goToWelcomeValue(ctx, session);
+}
+
+async function handleWelcomeValue(ctx: Context, session: Session, callbackData?: string) {
+  if (callbackData === "start") return goToTermsHealth(ctx, session);
+  if (callbackData === "how_it_works") return goToHowItWorks(ctx, session);
+  return sendWelcomeValue(ctx);
+}
+
+async function goToHowItWorks(ctx: Context, session: Session) {
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "HOW_IT_WORKS" },
+  });
+  await logOnboarding(ctx.from!.id, "onb_how_it_works");
+  return replyStatic(ctx, texts.howItWorks, {
+    reply_markup: new InlineKeyboard().text("Начать", "start"),
+  });
 }
 
 async function handleHowItWorks(ctx: Context, session: Session, callbackData?: string) {
-  if (callbackData === "start") return goToTerms(ctx, session);
-  return ctx.reply(texts.howItWorks, { reply_markup: new InlineKeyboard().text("Начать", "start") });
-}
-
-// Кнопка на «Условиях» больше не означает согласия на обработку данных:
-// за него теперь отвечает отдельный экран, и отказ тоже переехал туда.
-function termsKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("Понятно, дальше", "terms_accept");
-}
-
-async function goToTerms(ctx: Context, session: Session) {
-  await prisma.session.update({ where: { telegramId: session.telegramId }, data: { stage: "TERMS" } });
-  return ctx.reply(texts.terms, { reply_markup: termsKeyboard() });
-}
-
-async function handleTerms(ctx: Context, session: Session, callbackData?: string) {
-  if (callbackData === "terms_accept") return goToHealthScreen(ctx, session);
-  return ctx.reply(texts.terms, { reply_markup: termsKeyboard() });
+  if (callbackData === "start") return goToTermsHealth(ctx, session);
+  return replyStatic(ctx, texts.howItWorks, {
+    reply_markup: new InlineKeyboard().text("Начать", "start"),
+  });
 }
 
 // ── Обезличенный счётчик ────────────────────────────────────────────
@@ -263,37 +342,43 @@ async function bumpDailyCounter(name: string): Promise<void> {
   }
 }
 
-// ── Здоровье малыша ─────────────────────────────────────────────────
+// ── Условия и здоровье малыша ───────────────────────────────────────
 //
-// Вопросов о здоровье бот не задаёт. Вместо них — одно
-// самоподтверждение: родитель сам сверяется со списком и решает, подхожу
-// я ему или нет. Поэтому здесь нет ни ответа, который можно сохранить,
-// ни причины, которую можно записать.
+// Один экран с 15.10.2026: раньше условия и блок про здоровье были
+// двумя шагами подряд, и отдельная кнопка «Понятно, дальше» между ними
+// ничего не решала.
+//
+// Вопросов о здоровье бот не задаёт. Вместо них — самоподтверждение:
+// родитель сам сверяется со списком и решает, подхожу я ему или нет.
+// Поэтому здесь нет ни ответа, который можно сохранить, ни причины,
+// которую можно записать.
 
-async function sendHealthScreen(ctx: Context) {
-  return ctx.reply(texts.healthScreen, { reply_markup: healthScreenKeyboard() });
+async function sendTermsHealth(ctx: Context) {
+  await logOnboarding(ctx.from!.id, "onb_terms");
+  return replyStatic(ctx, texts.termsHealth, { reply_markup: healthScreenKeyboard() });
 }
 
-async function goToHealthScreen(ctx: Context, session: Session) {
+async function goToTermsHealth(ctx: Context, session: Session) {
   await prisma.session.update({
     where: { telegramId: session.telegramId },
-    data: { stage: "HEALTH_SCREEN" },
+    data: { stage: "TERMS_HEALTH" },
   });
-  return sendHealthScreen(ctx);
+  return sendTermsHealth(ctx);
 }
 
-async function handleHealthScreen(ctx: Context, session: Session, callbackData?: string) {
+async function handleTermsHealth(ctx: Context, session: Session, callbackData?: string) {
   if (callbackData === "health_ok") {
     // Подтверждение — такое же юридически значимое действие, как
     // согласие: пишем в журнал до того, как пустить дальше. Документа
-    // за ним не стоит, человек подтверждает факт о себе.
+    // за ним не стоит, человек подтверждает факт о себе. В журнал идёт
+    // весь экран целиком, вместе с условиями, — именно это он видел.
     const saved = await saveConsent(ctx, {
       telegramId: session.telegramId,
       type: "HEALTH_SELF_DECLARATION",
       action: "GRANTED",
       source: "ONBOARDING",
       documents: [],
-      messageText: texts.healthScreen,
+      messageText: texts.termsHealth,
       buttonText: HEALTH_OK,
       telegramMessageId: ctx.callbackQuery?.message?.message_id,
     });
@@ -305,7 +390,7 @@ async function handleHealthScreen(ctx: Context, session: Session, callbackData?:
 
   if (callbackData === "health_stop") return handleHealthExit(ctx, session);
 
-  return sendHealthScreen(ctx);
+  return sendTermsHealth(ctx);
 }
 
 // Родитель сказал, что что-то из списка есть. О причине не сохраняем
@@ -324,7 +409,7 @@ async function handleHealthExit(ctx: Context, session: Session) {
   // нельзя понять, кто именно ушёл.
   await bumpDailyCounter(HEALTH_EXIT_COUNTER);
 
-  return ctx.reply(texts.healthNotSuitable, { reply_markup: healthGuideKeyboard() });
+  return replyStatic(ctx, texts.healthNotSuitable, { reply_markup: healthGuideKeyboard() });
 }
 
 // Кнопку убираем сразу: гид отправляется один раз, а повторные нажатия
@@ -335,7 +420,7 @@ async function sendHealthGuide(ctx: Context) {
     await sendCachedDocument(ctx, projectFile(GUIDE_PDF), texts.healthGuideCaption);
   } catch (error) {
     console.error("Не удалось отправить гид в ветке «не подходит»:", error);
-    await ctx.reply(texts.healthGuideCaption);
+    await replyStatic(ctx, texts.healthGuideCaption);
   }
 }
 
@@ -349,8 +434,8 @@ function pdConsentText(): string {
 }
 
 async function sendPdConsent(ctx: Context) {
-  return ctx.reply(pdConsentText(), {
-    parse_mode: "HTML",
+  await logOnboarding(ctx.from!.id, "onb_pd_consent");
+  return replyStatic(ctx, pdConsentText(), {
     link_preview_options: { is_disabled: true },
     reply_markup: pdConsentKeyboard(),
   });
@@ -373,7 +458,7 @@ async function saveConsent(ctx: Context, input: Parameters<typeof recordConsent>
     return true;
   } catch (error) {
     console.error(`Не удалось записать согласие ${input.type} для #${input.telegramId}:`, error);
-    await ctx.reply(texts.consentSaveFailed).catch(() => {});
+    await replyStatic(ctx, texts.consentSaveFailed).catch(() => {});
     return false;
   }
 }
@@ -398,7 +483,7 @@ async function handlePdConsent(ctx: Context, session: Session, callbackData?: st
 
     // Стадию не меняем: /start после отказа должен вернуть к этому же
     // экрану, а не показывать приветствие заново.
-    return ctx.reply(texts.pdConsentDeclined);
+    return replyStatic(ctx, texts.pdConsentDeclined);
   }
 
   // Нажали кнопку старого сообщения или написали текстом — показываем
@@ -409,11 +494,12 @@ async function handlePdConsent(ctx: Context, session: Session, callbackData?: st
 // ── Согласие на рекламную рассылку ──────────────────────────────────
 
 function marketingConsentText(): string {
-  return texts.marketingConsent(env.MARKETING_CONSENT_URL);
+  return texts.marketingConsent(escapeHtml(env.MARKETING_CONSENT_URL));
 }
 
 async function sendMarketingConsent(ctx: Context) {
-  return ctx.reply(marketingConsentText(), {
+  await logOnboarding(ctx.from!.id, "onb_marketing");
+  return replyStatic(ctx, marketingConsentText(), {
     link_preview_options: { is_disabled: true },
     reply_markup: marketingConsentKeyboard(),
   });
@@ -472,7 +558,9 @@ async function startQuestionnaire(ctx: Context, session: Session) {
     where: { telegramId: session.telegramId },
     data: { stage: "QUESTION", status: "in_progress", currentQuestionNumber: first },
   });
-  await replyWithOptionalPhoto(ctx, texts.goStart, photos.goStart);
+  await logOnboarding(session.telegramId, "onb_go");
+  await replyWithOptionalPhoto(ctx, texts.goStart, photos.goStart, undefined, true);
+  await logOnboarding(session.telegramId, "quiz_q1");
   return sendQuestionPrompt(ctx, getQuestion(first), []);
 }
 
@@ -481,8 +569,10 @@ async function startQuestionnaire(ctx: Context, session: Session) {
 // Стадии самого онбординга: на них согласие как раз и спрашивается.
 const ONBOARDING_STAGES: Session["stage"][] = [
   "WELCOME",
+  "WELCOME_VALUE",
   "HOW_IT_WORKS",
   "TERMS",
+  "TERMS_HEALTH",
   "HEALTH_SCREEN",
   "PD_CONSENT",
   "MARKETING_CONSENT",
@@ -491,9 +581,9 @@ const ONBOARDING_STAGES: Session["stage"][] = [
 // Кнопки онбординга. Всё, что не отсюда, без согласия не работает —
 // включая кнопки под старыми сообщениями выше по чату.
 const ONBOARDING_CALLBACKS = new Set([
+  "welcome_value",
   "start",
   "how_it_works",
-  "terms_accept",
   "health_ok",
   "health_stop",
   "health_guide",
@@ -538,13 +628,13 @@ async function askPdConsentFirst(ctx: Context, session: Session) {
 }
 
 async function handleDeclineReason(ctx: Context, session: Session, messageText?: string) {
-  if (!messageText) return ctx.reply(texts.declineReasonPrompt);
+  if (!messageText) return replyStatic(ctx, texts.declineReasonPrompt);
   await saveAnswer(session.telegramId, -3, messageText);
   await prisma.session.update({
     where: { telegramId: session.telegramId },
     data: { stage: "WELCOME", status: "declined" },
   });
-  return ctx.reply(texts.declineFarewell);
+  return replyStatic(ctx, texts.declineFarewell);
 }
 
 async function resetToWelcomeAndSend(ctx: Context, session: Session) {
@@ -557,20 +647,28 @@ async function resetToWelcomeAndSend(ctx: Context, session: Session) {
 // Отправляет сообщение с картинкой, если она задана: текст уходит
 // подписью к фото. Если Telegram не смог скачать картинку (битая ссылка,
 // закрытый доступ) — не роняем анкету, шлём обычным текстом.
+// asHtml включаем только для статических текстов из texts.ts. У вопросов
+// анкеты разметки нет, а угловая скобка в тексте вопроса сломала бы
+// отправку — поэтому они уходят как раньше, простым текстом.
 async function replyWithOptionalPhoto(
   ctx: Context,
   text: string,
   photoUrl?: string,
-  markup?: InlineKeyboard
+  markup?: InlineKeyboard,
+  asHtml = false
 ) {
+  const options = markup ? { reply_markup: markup } : {};
+
   if (photoUrl) {
     try {
-      return await ctx.replyWithPhoto(photoUrl, { caption: text, reply_markup: markup });
+      return asHtml
+        ? await replyPhotoStatic(ctx, photoUrl, text, options)
+        : await ctx.replyWithPhoto(photoUrl, { ...options, caption: text });
     } catch {
       // падаем в обычную текстовую отправку ниже
     }
   }
-  return ctx.reply(text, markup ? { reply_markup: markup } : undefined);
+  return asHtml ? replyStatic(ctx, text, options) : ctx.reply(text, options);
 }
 
 async function sendQuestionPrompt(ctx: Context, question: QuestionDef, selected: string[]) {
@@ -645,12 +743,12 @@ async function consumeAnswer(
 ): Promise<AnswerOutcome> {
   if (question.type === "number") {
     if (!messageText) {
-      await ctx.reply(texts.invalidNumber);
+      await replyStatic(ctx, texts.invalidNumber);
       return { kind: "handled" };
     }
     const num = Number(messageText.replace(",", "."));
     if (Number.isNaN(num)) {
-      await ctx.reply(texts.invalidNumber);
+      await replyStatic(ctx, texts.invalidNumber);
       return { kind: "handled" };
     }
 
@@ -665,7 +763,7 @@ async function consumeAnswer(
         where: { telegramId: session.telegramId },
         data: { stage: "OUT_OF_RANGE", status: "out_of_range" },
       });
-      await ctx.reply(texts.outOfRange);
+      await replyStatic(ctx, texts.outOfRange);
       return { kind: "handled" };
     }
     await saveQuestionAnswer(session.telegramId, qNum, messageText);
@@ -818,7 +916,7 @@ async function sendSummary(ctx: Context, telegramId: bigint) {
   for (const chunk of splitForTelegram(`${texts.summaryHeader}\n\n${body}`)) {
     await ctx.reply(chunk);
   }
-  return ctx.reply(texts.summaryConfirmPrompt, { reply_markup: summaryKeyboard() });
+  return replyStatic(ctx, texts.summaryConfirmPrompt, { reply_markup: summaryKeyboard() });
 }
 
 async function goToSummary(ctx: Context, telegramId: bigint) {
@@ -873,6 +971,8 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
   // сообщение сразу. Отбивка и черновик придут тебе в Telegram сами.
   void announceAndGenerateDraft(ctx.api, telegramId);
 
+  await logOnboarding(telegramId, "quiz_completed");
+
   // Картинка идёт отдельным сообщением и без подписи: текст относится к
   // гиду и уходит вместе с ним. Не отправилась — не страшно, главное
   // сообщение идёт следом.
@@ -880,15 +980,27 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
     .replyWithPhoto(photos.questionnaireComplete)
     .catch((error) => console.error("Не удалось отправить картинку после анкеты:", error));
 
-  // Текст идёт подписью к гиду, одним сообщением: он прямо на этот файл
-  // и указывает. Если отправить документ не вышло, шлём хотя бы текст —
-  // анкета уже сдана, и человек не должен остаться вообще без ответа.
+  return sendGuideAfterQuiz(ctx, telegramId);
+}
+
+// Азбуку обещает приветствие, поэтому её получает каждый, кто дошёл до
+// конца анкеты, — но только один раз: второй файл при повторном
+// прохождении человеку не нужен.
+//
+// Текст идёт подписью к гиду, одним сообщением: он прямо на этот файл и
+// указывает. Если отправить документ не вышло, шлём хотя бы текст —
+// анкета уже сдана, и человек не должен остаться вообще без ответа.
+async function sendGuideAfterQuiz(ctx: Context, telegramId: bigint) {
+  if (await hasOnboardingEvent(telegramId, "guide_sent")) return;
+
   try {
-    await sendCachedDocument(ctx, projectFile(GUIDE_PDF), texts.questionnaireComplete);
+    await sendCachedDocument(ctx, projectFile(GUIDE_PDF), texts.guideAfterQuiz);
   } catch (error) {
     console.error("Не удалось отправить гид после анкеты:", error);
-    await ctx.reply(texts.questionnaireComplete);
+    await replyStatic(ctx, texts.guideAfterQuiz);
   }
+
+  await logOnboarding(telegramId, "guide_sent");
 }
 
 // Порядок сообщений админу после подтверждения анкеты: сначала отбивка,
@@ -1070,7 +1182,7 @@ async function reportDraftFailure(api: Api, adminChatId: number, telegramId: big
 async function askWhichQuestionToEdit(ctx: Context, telegramId: bigint) {
   const answers = await getAnswersMap(telegramId);
   const count = summaryQuestions(answers).length;
-  return ctx.reply(texts.editPickQuestion(count ? `1–${count}` : "—"));
+  return replyStatic(ctx, texts.editPickQuestion(count ? `1–${count}` : "—"));
 }
 
 // Пользователь назвал номер строки из итоговой анкеты.
@@ -1081,7 +1193,7 @@ async function handleEditPickQuestion(ctx: Context, session: Session, messageTex
   const question = Number.isInteger(position) ? questions[position - 1] : undefined;
 
   if (!question) {
-    return ctx.reply(texts.editUnknownNumber(questions.length ? `1–${questions.length}` : "—"));
+    return replyStatic(ctx, texts.editUnknownNumber(questions.length ? `1–${questions.length}` : "—"));
   }
   return startEditingQuestion(ctx, session.telegramId, question, answers);
 }
@@ -1134,7 +1246,7 @@ async function afterEditSaved(ctx: Context, telegramId: bigint) {
     await prisma.answer.deleteMany({
       where: { telegramId, questionNumber: { in: stale.map((q) => q.number) } },
     });
-    await ctx.reply(texts.editStaleRemoved);
+    await replyStatic(ctx, texts.editStaleRemoved);
     answers = await getAnswersMap(telegramId);
   }
 
@@ -1147,7 +1259,7 @@ async function afterEditSaved(ctx: Context, telegramId: bigint) {
     where: { telegramId },
     data: { stage: "EDIT_MORE", currentQuestionNumber: null, tempSelections: [] },
   });
-  return ctx.reply(texts.editMorePrompt, { reply_markup: editMoreKeyboard() });
+  return replyStatic(ctx, texts.editMorePrompt, { reply_markup: editMoreKeyboard() });
 }
 
 async function handleEditMore(ctx: Context, session: Session, callbackData?: string) {
@@ -1166,7 +1278,7 @@ async function handleEditMore(ctx: Context, session: Session, callbackData?: str
   }
 
   if (callbackData) return;
-  return ctx.reply(texts.editMorePrompt, { reply_markup: editMoreKeyboard() });
+  return replyStatic(ctx, texts.editMorePrompt, { reply_markup: editMoreKeyboard() });
 }
 
 // ── Служебные команды /goto и /reset ────────────────────────────────
@@ -1240,7 +1352,7 @@ export async function handleResetCommand(ctx: Context) {
     },
   });
 
-  await ctx.reply(texts.resetDone);
+  await replyStatic(ctx, texts.resetDone);
   return sendWelcome(ctx);
 }
 
@@ -1249,7 +1361,7 @@ export async function handleResetCommand(ctx: Context) {
 async function handleAwaitingRecommendation(ctx: Context, session: Session, messageText?: string) {
   if (!messageText) return;
   await saveAnswer(session.telegramId, 99, messageText);
-  return ctx.reply(texts.addendumAck);
+  return replyStatic(ctx, texts.addendumAck);
 }
 
 // ── Оффер платного PDF ──────────────────────────────────────────────
@@ -1257,7 +1369,7 @@ async function handleAwaitingRecommendation(ctx: Context, session: Session, mess
 const EXAMPLE_PDF = "assets/example/Drema_plan_sna_primer.pdf";
 
 function exampleFollowUp(ctx: Context) {
-  return ctx.reply(texts.exampleFollowup, {
+  return replyStatic(ctx, texts.exampleFollowup, {
     reply_markup: exampleFollowupKeyboard(formatPrice(env.PDF_PRICE_RUB)),
   });
 }
@@ -1280,8 +1392,8 @@ function consultPrice(): string {
 // кнопками. Карточки продуктов дальше подменяют текст второго
 // сообщения, поэтому отдельным сообщением оно и уходит.
 async function sendOfferMessages(api: Api, chatId: bigint) {
-  await api.sendMessage(Number(chatId), texts.offerSupport);
-  await api.sendMessage(Number(chatId), texts.offerChoice(pdfPrice(), consultPrice()), {
+  await sendStatic(api, chatId, texts.offerSupport);
+  await sendStatic(api, chatId, texts.offerChoice(pdfPrice(), consultPrice()), {
     reply_markup: offerChoiceKeyboard(),
   });
 }
@@ -1304,12 +1416,12 @@ export async function sendOfferTo(api: Api, telegramId: bigint, chatId: bigint) 
 // уходит новым сообщением — хуже выглядит, но работает.
 async function replaceWithCard(ctx: Context, text: string, markup: InlineKeyboard) {
   try {
-    await ctx.editMessageText(text, { reply_markup: markup });
+    await ctx.editMessageText(text, { reply_markup: markup, parse_mode: "HTML" });
   } catch (error) {
     // Повторный тап по той же кнопке: сообщение уже такое, какое нужно.
     // Отправлять копию было бы хуже, чем не делать ничего.
     if (String(error).includes("message is not modified")) return;
-    await ctx.reply(text, { reply_markup: markup });
+    await replyStatic(ctx, text, { reply_markup: markup });
   }
 }
 
@@ -1378,7 +1490,7 @@ async function handleDecline(ctx: Context, session: Session) {
   if (declinedRecently) return;
 
   await logOfferEvent(session.telegramId, "offer_declined");
-  await ctx.reply(texts.offerDeclined);
+  await replyStatic(ctx, texts.offerDeclined);
 
   // Если человек уже проходил CSAT, второй раз не спрашиваем.
   if (session.stage === "CSAT_FEEDBACK" || session.stage === "CSAT_DONE") return;
@@ -1387,7 +1499,7 @@ async function handleDecline(ctx: Context, session: Session) {
     where: { telegramId: session.telegramId },
     data: { stage: "CSAT_RATING" },
   });
-  return ctx.reply(texts.csatPrompt, { reply_markup: csatKeyboard() });
+  return replyStatic(ctx, texts.csatPrompt, { reply_markup: csatKeyboard() });
 }
 
 // Повторное «Купить» не создаёт второй заказ: отвечаем по статусу
@@ -1408,7 +1520,7 @@ async function handleBuy(ctx: Context, session: Session) {
   }
 
   const order = await createPdfOrder(session.telegramId);
-  await ctx.reply(texts.orderAccepted);
+  await replyStatic(ctx, texts.orderAccepted);
 
   await ctx.api
     .sendMessage(Number(env.ADMIN_TELEGRAM_ID), `🧾 Новый заказ PDF #${order.id} от #${session.telegramId}`)
@@ -1435,7 +1547,18 @@ type OfferEventName =
   | "example_clicked"
   | "buy_clicked"
   | "consult_signup"
-  | "offer_declined";
+  | "offer_declined"
+  | "onb_welcome"
+  | "onb_welcome_value"
+  | "onb_how_it_works"
+  | "onb_terms"
+  | "onb_health"
+  | "onb_pd_consent"
+  | "onb_marketing"
+  | "onb_go"
+  | "quiz_q1"
+  | "quiz_completed"
+  | "guide_sent";
 
 async function logOfferEvent(telegramId: bigint, type: OfferEventName) {
   await prisma.offerEvent
@@ -1616,18 +1739,18 @@ export function startReminders(api: Api) {
 
 async function handleCsatRating(ctx: Context, session: Session, callbackData?: string) {
   const match = callbackData?.match(/^csat_([1-5])$/);
-  if (!match) return ctx.reply(texts.csatPrompt, { reply_markup: csatKeyboard() });
+  if (!match) return replyStatic(ctx, texts.csatPrompt, { reply_markup: csatKeyboard() });
 
   await saveAnswer(session.telegramId, 30, match[1]);
   await prisma.session.update({ where: { telegramId: session.telegramId }, data: { stage: "CSAT_FEEDBACK" } });
-  return ctx.reply(texts.csatFeedbackPrompt);
+  return replyStatic(ctx, texts.csatFeedbackPrompt);
 }
 
 async function handleCsatFeedback(ctx: Context, session: Session, messageText?: string) {
   if (!messageText) return; // тишина ок, ничего страшного не происходит
   await saveAnswer(session.telegramId, 31, messageText);
   await prisma.session.update({ where: { telegramId: session.telegramId }, data: { stage: "CSAT_DONE" } });
-  return ctx.reply(texts.csatThankYou);
+  return replyStatic(ctx, texts.csatThankYou);
 }
 
 // ── Функции для админки (src/admin.ts) ──────────────────────────────
