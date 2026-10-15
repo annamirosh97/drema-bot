@@ -20,6 +20,7 @@ enum Stage {
   HOW_IT_WORKS // показано "Как я работаю", ждём "Начать"
   TERMS // показаны условия, ждём согласие/отказ
   DECLINE_REASON // ждём текст причины отказа (прежний отказ на «Условиях», новым не выдаётся)
+  HEALTH_SCREEN // показан экран про здоровье малыша, ждём подтверждение
   PD_CONSENT // показано согласие на обработку данных, ждём ответ
   MARKETING_CONSENT // показан вопрос про рассылку, ждём ответ
   QUESTION // идёт анкета, см. currentQuestionNumber
@@ -236,6 +237,10 @@ enum ConsentType {
   MARKETING
   OFFER_ACCEPTANCE
   SPECIALIST_TRANSFER
+  // Родитель сам подтвердил, что у малыша нет особенностей здоровья,
+  // влияющих на сон. Документа за этим подтверждением не стоит:
+  // documentIds у таких записей пустой.
+  HEALTH_SELF_DECLARATION
 }
 
 enum ConsentAction {
@@ -278,6 +283,22 @@ model ConsentRecord {
 
   @@index([telegramId, type, createdAt])
   @@index([type, action])
+}
+
+// Обезличенный счётчик по дням.
+//
+// Нужен там, где считать можно, а знать кто — нельзя: например, сколько
+// родителей ушло с экрана здоровья. Ни telegram id, ни связи с сессией
+// здесь нет намеренно — по этой таблице нельзя восстановить, кто именно
+// нажал кнопку, а это и есть причина, по которой такие данные вообще
+// разрешено хранить.
+model DailyCounter {
+  id    Int      @id @default(autoincrement())
+  name  String // например health_screen_exit
+  day   DateTime @db.Date
+  count Int      @default(0)
+
+  @@unique([name, day])
 }
 
 // Воронка оффера: показ экрана выбора, открытие карточек, возврат

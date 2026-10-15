@@ -18,7 +18,6 @@ export function safeGetQuestion(number: number): QuestionDef | null {
 }
 
 export async function buildPrepText(telegramId: bigint): Promise<string> {
-  const session = await prisma.session.findUnique({ where: { telegramId } });
   const rows = await prisma.answer.findMany({ where: { telegramId }, orderBy: { questionNumber: "asc" } });
 
   const qaLines: string[] = [];
@@ -37,6 +36,7 @@ export async function buildPrepText(telegramId: bigint): Promise<string> {
 
   let out = qaLines.join("\n\n") || "Нет сохранённых ответов.";
   if (addenda.length) out += `\n\n— Дополнительно от пользователя —\n${addenda.join("\n")}`;
-  if (session?.yellowFlags.length) out += `\n\n⚠️ Обратить внимание: ${session.yellowFlags.join(", ")}`;
+  // Строка «Обратить внимание» с жёлтыми флагами убрана 15.10.2026:
+  // флагов больше нет, и подмешивать их в вход для модели нечего.
   return out;
 }

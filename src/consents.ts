@@ -70,6 +70,7 @@ const ALL_TYPES: ConsentType[] = [
   "MARKETING",
   "OFFER_ACCEPTANCE",
   "SPECIALIST_TRANSFER",
+  "HEALTH_SELF_DECLARATION",
 ];
 
 const EMPTY: ConsentStatus = { action: null, at: null, record: null };
@@ -109,6 +110,21 @@ export async function getConsent(
 
 export function isGranted(status: ConsentStatus): boolean {
   return status.action === "GRANTED";
+}
+
+// Типы согласий человеческими словами — для админки и выгрузок. У
+// подтверждения о здоровье подпись развёрнутая: проверяющей стороне
+// важно видеть, что именно подтвердил родитель, а не имя константы.
+const TYPE_LABELS: Record<ConsentType, string> = {
+  PD_PROCESSING: "Обработка персональных данных",
+  MARKETING: "Рекламная рассылка",
+  OFFER_ACCEPTANCE: "Принятие оферты",
+  SPECIALIST_TRANSFER: "Передача данных специалисту",
+  HEALTH_SELF_DECLARATION: "Подтверждение: нет особенностей здоровья, влияющих на сон",
+};
+
+export function consentTypeLabel(type: ConsentType): string {
+  return TYPE_LABELS[type] ?? type;
 }
 
 // ── Те, кто пользовался ботом до появления согласий ─────────────────

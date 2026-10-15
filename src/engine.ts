@@ -25,16 +25,27 @@ import { projectFile, sendCachedDocument } from "./staticDocs";
 // Гид «Азбука сна» — уходит каждому сразу после анкеты, пока готовится разбор.
 const GUIDE_PDF = "assets/guide/Drema_azbuka_sna.pdf";
 import { orderUrl } from "./web/server";
-import { QUESTIONS, QuestionDef, getFirstQuestionNumber, getNextQuestionNumber, getQuestion } from "./questions";
+import {
+  QUESTIONS,
+  QuestionDef,
+  getFirstQuestionNumber,
+  getNextQuestionNumber,
+  getQuestion,
+  nearestQuestionNumber,
+  questionTextWithCounter,
+} from "./questions";
 import { InputFile } from "grammy";
 import { getConsent, recordConsent } from "./consents";
 import {
   CONSULT_SELF_WRITE_BUTTON,
+  HEALTH_OK,
   MARKETING_NO,
   MARKETING_YES,
   PD_CONSENT_NO,
   PD_CONSENT_YES,
   csatKeyboard,
+  healthGuideKeyboard,
+  healthScreenKeyboard,
   marketingConsentKeyboard,
   pdConsentKeyboard,
   editMoreKeyboard,
@@ -139,7 +150,13 @@ export async function handleIncoming(ctx: Context) {
     if (await takeConsultSelfWrite(ctx, session)) return;
   }
 
+  // Кнопка «Прислать гид» живёт в ветке «не подходит», где сессия уже
+  // вернулась в исходное состояние, — поэтому разбираем её до стадий.
+  if (callbackData === "health_guide") return sendHealthGuide(ctx);
+
   switch (session.stage) {
+    case "HEALTH_SCREEN":
+      return handleHealthScreen(ctx, session, callbackData);
     case "PD_CONSENT":
       return handlePdConsent(ctx, session, callbackData);
     case "MARKETING_CONSENT":
@@ -217,8 +234,109 @@ async function goToTerms(ctx: Context, session: Session) {
 }
 
 async function handleTerms(ctx: Context, session: Session, callbackData?: string) {
-  if (callbackData === "terms_accept") return goToPdConsent(ctx, session);
+  if (callbackData === "terms_accept") return goToHealthScreen(ctx, session);
   return ctx.reply(texts.terms, { reply_markup: termsKeyboard() });
+}
+
+// ── Обезличенный счётчик ────────────────────────────────────────────
+
+// Имя счётчика ухода с экрана здоровья. По этой строке его видно и в
+// базе, и в /stats.
+const HEALTH_EXIT_COUNTER = "health_screen_exit";
+
+// Прибавляет единицу к счётчику за сегодня. Намеренно не знает, кто
+// нажал кнопку: в таблице нет ни telegram id, ни связи с сессией.
+// Сбой счётчика не должен ломать ответ человеку, поэтому ошибку только
+// логируем.
+async function bumpDailyCounter(name: string): Promise<void> {
+  const day = new Date();
+  day.setUTCHours(0, 0, 0, 0);
+
+  try {
+    await prisma.dailyCounter.upsert({
+      where: { name_day: { name, day } },
+      create: { name, day, count: 1 },
+      update: { count: { increment: 1 } },
+    });
+  } catch (error) {
+    console.error(`Не удалось увеличить счётчик ${name}:`, error);
+  }
+}
+
+// ── Здоровье малыша ─────────────────────────────────────────────────
+//
+// Вопросов о здоровье бот не задаёт. Вместо них — одно
+// самоподтверждение: родитель сам сверяется со списком и решает, подхожу
+// я ему или нет. Поэтому здесь нет ни ответа, который можно сохранить,
+// ни причины, которую можно записать.
+
+async function sendHealthScreen(ctx: Context) {
+  return ctx.reply(texts.healthScreen, { reply_markup: healthScreenKeyboard() });
+}
+
+async function goToHealthScreen(ctx: Context, session: Session) {
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "HEALTH_SCREEN" },
+  });
+  return sendHealthScreen(ctx);
+}
+
+async function handleHealthScreen(ctx: Context, session: Session, callbackData?: string) {
+  if (callbackData === "health_ok") {
+    // Подтверждение — такое же юридически значимое действие, как
+    // согласие: пишем в журнал до того, как пустить дальше. Документа
+    // за ним не стоит, человек подтверждает факт о себе.
+    const saved = await saveConsent(ctx, {
+      telegramId: session.telegramId,
+      type: "HEALTH_SELF_DECLARATION",
+      action: "GRANTED",
+      source: "ONBOARDING",
+      documents: [],
+      messageText: texts.healthScreen,
+      buttonText: HEALTH_OK,
+      telegramMessageId: ctx.callbackQuery?.message?.message_id,
+    });
+    if (!saved) return;
+
+    await dropKeyboard(ctx);
+    return goToPdConsent(ctx, session);
+  }
+
+  if (callbackData === "health_stop") return handleHealthExit(ctx, session);
+
+  return sendHealthScreen(ctx);
+}
+
+// Родитель сказал, что что-то из списка есть. О причине не сохраняем
+// ничего: ни записи в журнале, ни ответа, ни статуса — это данные о
+// здоровье, собирать которые бот и перестал. Сессию возвращаем в
+// исходное состояние, как будто человек ещё не начинал: если ситуация
+// изменится, он пройдёт путь заново с чистого листа.
+async function handleHealthExit(ctx: Context, session: Session) {
+  await dropKeyboard(ctx);
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "WELCOME", status: "onboarding", resumeStage: null },
+  });
+
+  // Единственный след — обезличенный счётчик по дням, по которому
+  // нельзя понять, кто именно ушёл.
+  await bumpDailyCounter(HEALTH_EXIT_COUNTER);
+
+  return ctx.reply(texts.healthNotSuitable, { reply_markup: healthGuideKeyboard() });
+}
+
+// Кнопку убираем сразу: гид отправляется один раз, а повторные нажатия
+// присылали бы один и тот же файл снова.
+async function sendHealthGuide(ctx: Context) {
+  await dropKeyboard(ctx);
+  try {
+    await sendCachedDocument(ctx, projectFile(GUIDE_PDF), texts.healthGuideCaption);
+  } catch (error) {
+    console.error("Не удалось отправить гид в ветке «не подходит»:", error);
+    await ctx.reply(texts.healthGuideCaption);
+  }
 }
 
 // ── Согласие на обработку персональных данных ───────────────────────
@@ -365,6 +483,7 @@ const ONBOARDING_STAGES: Session["stage"][] = [
   "WELCOME",
   "HOW_IT_WORKS",
   "TERMS",
+  "HEALTH_SCREEN",
   "PD_CONSENT",
   "MARKETING_CONSENT",
 ];
@@ -375,6 +494,9 @@ const ONBOARDING_CALLBACKS = new Set([
   "start",
   "how_it_works",
   "terms_accept",
+  "health_ok",
+  "health_stop",
+  "health_guide",
   "pd_consent_yes",
   "pd_consent_no",
   "marketing_yes",
@@ -459,7 +581,7 @@ async function sendQuestionPrompt(ctx: Context, question: QuestionDef, selected:
     markup = multiChoiceKeyboard(question.options, selected);
   }
 
-  return replyWithOptionalPhoto(ctx, question.text, question.photoUrl, markup);
+  return replyWithOptionalPhoto(ctx, questionTextWithCounter(question), question.photoUrl, markup);
 }
 
 // Перерисовывает сообщение с вопросом после того, как пользователь нажал
@@ -478,7 +600,9 @@ async function markQuestionAnswered(ctx: Context, question: QuestionDef, chosen:
     return;
   }
 
-  const body = `${question.text}\n\n${texts.answeredMark(chosen)}`;
+  // Со счётчиком: сообщение подменяется тем же текстом, который человек
+  // уже видел, иначе в истории чата вопрос вдруг потерял бы номер.
+  const body = `${questionTextWithCounter(question)}\n\n${texts.answeredMark(chosen)}`;
 
   // У вопроса с картинкой текст лежит в подписи к фото, у обычного — в тексте
   // сообщения, и правятся они разными методами Telegram API.
@@ -507,8 +631,8 @@ async function advanceQuestionnaire(ctx: Context, telegramId: bigint, currentQNu
 // решает вызывающий: идти к следующему вопросу (обычный проход анкеты)
 // или вернуться к правке (handleEditAnswer). "handled" — записывать
 // нечего: невалидный ввод, переключение галочки в multi_choice или
-// анкета остановлена по возрасту/красному флагу; пользователю в этих
-// случаях уже ответили внутри.
+// анкета остановлена по возрасту; пользователю в этих случаях уже
+// ответили внутри.
 type AnswerOutcome = { kind: "handled" } | { kind: "saved" };
 
 async function consumeAnswer(
@@ -575,25 +699,13 @@ async function consumeAnswer(
     const answerText = selections.join(", ") || "—";
     await markQuestionAnswered(ctx, question, answerText);
 
-    if (question.redFlagValues?.some((v) => selections.includes(v))) {
-      await saveQuestionAnswer(session.telegramId, qNum, answerText);
-      await prisma.session.update({
-        where: { telegramId: session.telegramId },
-        data: { stage: "RED_FLAG_ENDED", status: "red_flag_ended", tempSelections: [] },
-      });
-      await ctx.reply(texts.redFlag);
-      return { kind: "handled" };
-    }
-
-    let yellowFlags = session.yellowFlags;
-    if (question.yellowFlagLabel && question.yellowFlagValues?.some((v) => selections.includes(v))) {
-      yellowFlags = Array.from(new Set([...yellowFlags, question.yellowFlagLabel]));
-    }
-
+    // Красных и жёлтых флагов в анкете больше нет: с 15.10.2026 бот не
+    // спрашивает о здоровье, а недоношенность учитывается методологией
+    // через скорректированный возраст, а не через флаг.
     await saveQuestionAnswer(session.telegramId, qNum, answerText);
     await prisma.session.update({
       where: { telegramId: session.telegramId },
-      data: { tempSelections: [], yellowFlags },
+      data: { tempSelections: [] },
     });
     return { kind: "saved" };
   }
@@ -610,13 +722,32 @@ async function consumeAnswer(
 async function handleQuestion(ctx: Context, session: Session, callbackData?: string, messageText?: string) {
   const qNum = session.currentQuestionNumber;
   if (qNum == null) return resetToWelcomeAndSend(ctx, session);
+
+  // Человек мог стоять на вопросе, который из анкеты убрали (вопросы о
+  // здоровье удалены 15.10.2026). Переводим его на следующий
+  // существующий молча: сообщать тут не о чем, анкета просто
+  // продолжается.
   const question = safeGetQuestion(qNum);
-  if (!question) return resetToWelcomeAndSend(ctx, session);
+  if (!question) return resumeFromRemovedQuestion(ctx, session, qNum);
 
   const outcome = await consumeAnswer(ctx, session, question, qNum, callbackData, messageText);
   if (outcome.kind !== "saved") return;
 
   return advanceQuestionnaire(ctx, session.telegramId, qNum);
+}
+
+// Вопроса, на котором стоял человек, больше нет. Ведём его дальше с
+// ближайшего существующего, а если дальше ничего не осталось — сразу к
+// сверке ответов.
+async function resumeFromRemovedQuestion(ctx: Context, session: Session, qNum: number) {
+  const next = nearestQuestionNumber(qNum);
+  if (next === null) return goToSummary(ctx, session.telegramId);
+
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { currentQuestionNumber: next, tempSelections: [] },
+  });
+  return sendQuestionPrompt(ctx, getQuestion(next), []);
 }
 
 // ── Итоговая анкета и правка ответов ────────────────────────────────

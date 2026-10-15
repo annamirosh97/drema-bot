@@ -371,7 +371,8 @@ export function registerAdminCommands(bot: Bot) {
 
   bot.command("stats", async (ctx) => {
     if (!isAdmin(ctx)) return;
-    const [total, completed, pdRecords, events, orders, consults] = await Promise.all([
+    const [total, completed, pdRecords, events, orders, consults, healthExitRows] =
+      await Promise.all([
       prisma.session.count(),
       prisma.session.count({ where: { status: "completed" } }),
       // Отказы теперь считаем по журналу согласий: кнопка «Пока не
@@ -385,7 +386,17 @@ export function registerAdminCommands(bot: Bot) {
       prisma.offerEvent.findMany({ select: { telegramId: true, type: true } }),
       prisma.order.groupBy({ by: ["status"], _count: true }),
       prisma.consultRequest.groupBy({ by: ["status"], _count: true }),
+      // Обезличенный счётчик ухода с экрана здоровья: по дням, без
+      // привязки к людям. За 30 дней — чтобы цифра была про сейчас.
+      prisma.dailyCounter.findMany({
+        where: {
+          name: "health_screen_exit",
+          day: { gte: new Date(Date.now() - 30 * 24 * 3_600_000) },
+        },
+      }),
     ]);
+
+    const healthExits = healthExitRows.reduce((sum, row) => sum + row.count, 0);
 
     // Текущее состояние согласия — последняя запись по человеку, а
     // записи пришли от новых к старым: первая встреченная и есть она.
@@ -435,6 +446,7 @@ export function registerAdminCommands(bot: Bot) {
       `Всего пользователей: ${total}\n` +
         `Дали согласие на обработку данных: ${granted}\n` +
         `Отказались на согласии: ${declined}\n` +
+        `Ушли с экрана здоровья за 30 дней: ${healthExits}\n` +
         `Завершили анкету: ${completed}\n\n` +
         `Экран выбора показан: ${shown.size}\n` +
         `Открыли карточку плана: ${pdfCard.size} (${pct(pdfCard.size, shown.size)})\n` +

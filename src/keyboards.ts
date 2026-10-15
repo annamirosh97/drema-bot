@@ -30,6 +30,23 @@ export function multiChoiceKeyboard(options: string[], selected: string[]): Inli
 // проверяющая сторона в старых записях, поэтому они вынесены в
 // константы и берутся отсюда и кодом, и журналом.
 
+export const HEALTH_OK = "Ничего из этого нет, продолжить";
+export const HEALTH_STOP = "Есть что-то из списка";
+
+export function healthScreenKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(HEALTH_OK, "health_ok")
+    .row()
+    .text(HEALTH_STOP, "health_stop");
+}
+
+// Единственная кнопка в ветке «не подходит». Ни офферов, ни покупок
+// здесь нет и быть не должно: человеку только что сказали, что разбор
+// подготовить не получится.
+export function healthGuideKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("Прислать гид", "health_guide");
+}
+
 export const PD_CONSENT_YES = "Даю согласие";
 export const PD_CONSENT_NO = "Не сейчас";
 export const MARKETING_YES = "Да, присылайте";
