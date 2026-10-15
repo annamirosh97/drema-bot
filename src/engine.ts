@@ -1596,59 +1596,20 @@ export async function approveAndSendPdf(api: Api, orderId: number): Promise<void
   });
 }
 
-// ── Напоминания о зависших заказах ──────────────────────────────────
+// ── Напоминания по заявкам на консультацию ──────────────────────────
+//
+// Напоминания о зависших заказах PDF убраны 15.10.2026: их настроят
+// отдельно и по-другому. Проверка заявок осталась — она про то, что
+// родитель ждёт ответа специалиста, а не про сроки по заказу.
 
 const REMINDER_INTERVAL_MS = 30 * 60 * 1000;
-const REMIND_AFTER_HOURS = 12;
-const URGENT_AFTER_HOURS = 20;
-// Родителям обещаны сутки, поэтому напоминать раз в три часа достаточно
-// часто, чтобы не пропустить срок, и редко, чтобы не надоесть.
-const REMINDER_COOLDOWN_MS = 3 * 60 * 60 * 1000;
 
-// Когда последний раз напоминали по каждому заказу. В памяти процесса:
-// после перезапуска напомним заново, и это не беда.
-const lastReminded = new Map<number, number>();
-
-// Один таймер на все напоминания: и про заказы PDF, и про заявки на
-// консультацию. Проверки независимы, поэтому сбой одной не отменяет другую.
-export function startOrderReminders(api: Api) {
+export function startReminders(api: Api) {
   setInterval(() => {
-    void remindAboutStuckOrders(api).catch((error) =>
-      console.error("Не удалось проверить зависшие заказы:", error)
-    );
     void remindAboutStuckConsults(api).catch((error) =>
       console.error("Не удалось проверить заявки на консультацию:", error)
     );
   }, REMINDER_INTERVAL_MS);
-}
-
-async function remindAboutStuckOrders(api: Api) {
-  const threshold = new Date(Date.now() - REMIND_AFTER_HOURS * 3_600_000);
-  const stuck = await prisma.order.findMany({
-    where: {
-      status: { in: ["GENERATING", "DRAFT_READY", "FAILED"] },
-      createdAt: { lt: threshold },
-    },
-    orderBy: { createdAt: "asc" },
-  });
-
-  for (const order of stuck) {
-    const previous = lastReminded.get(order.id) ?? 0;
-    if (Date.now() - previous < REMINDER_COOLDOWN_MS) continue;
-
-    const hours = Math.floor((Date.now() - order.createdAt.getTime()) / 3_600_000);
-    const urgent = hours >= URGENT_AFTER_HOURS ? "🔴 срочно: " : "";
-    const link = orderUrl(order.id);
-
-    await api
-      .sendMessage(
-        Number(env.ADMIN_TELEGRAM_ID),
-        `${urgent}заказ PDF #${order.id} ждёт ${hours} ч, статус ${order.status}.` +
-          (link ? `\n${link}` : "")
-      )
-      .then(() => lastReminded.set(order.id, Date.now()))
-      .catch((error) => console.error(`Не удалось напомнить о заказе #${order.id}:`, error));
-  }
 }
 
 // ── CSAT ─────────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ import { handleIncoming, handleGotoCommand, handleResetCommand } from "./engine"
 import { handleConsultStatusCallback } from "./consult";
 import { registerAdminCommands, handleAdminFlowMessage } from "./admin";
 import { startAdminServer } from "./web/server";
-import { startOrderReminders } from "./engine";
+import { startReminders } from "./engine";
 import { startUpsellScheduler } from "./upsell";
 import { loadLegalDocuments } from "./legalDocs";
 import { countUsersWithoutPdConsent } from "./consents";
@@ -82,8 +82,8 @@ async function main() {
   // Веб-админка живёт в этом же процессе. Если ADMIN_PASSWORD не задан,
   // сервер всё равно поднимается, но админка отвечает 503 с объяснением.
   startAdminServer(bot.api);
-  // Напоминания о заказах, которые висят дольше обещанных суток.
-  startOrderReminders(bot.api);
+  // Напоминания по заявкам на консультацию, которые ждут контакта.
+  startReminders(bot.api);
   // Предложение консультации со скидкой через пару минут после плана.
   startUpsellScheduler(bot.api);
   await bot.start({
