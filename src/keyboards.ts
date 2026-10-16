@@ -138,6 +138,47 @@ export function editMoreKeyboard(): InlineKeyboard {
     .text("Нет, это всё", "edit_more_no");
 }
 
+// ── Отложенные вопросы обратной связи ───────────────────────────────
+//
+// Подписи кнопок уходят в журнал событий и в админку, поэтому живут
+// константами: по ним потом собирается статистика.
+
+export const ANALYSIS_RATINGS = [
+  { label: "Да, очень похоже", data: "afb_yes" },
+  { label: "Отчасти", data: "afb_partly" },
+  { label: "Не совсем", data: "afb_no" },
+] as const;
+
+export const PDF_RESULTS = [
+  { label: "Стало лучше", data: "pfb_better" },
+  { label: "Без изменений", data: "pfb_same" },
+  { label: "Стало хуже", data: "pfb_worse" },
+  { label: "Пока не начали", data: "pfb_not_started" },
+] as const;
+
+export const FEEDBACK_SKIP = "Пропустить";
+
+// По одной в строке: варианты длинные, в ряд не помещаются.
+export function analysisFeedbackKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  for (const r of ANALYSIS_RATINGS) kb.text(r.label, r.data).row();
+  return kb;
+}
+
+// В два ряда по две: подписи короткие, и так их видно целиком.
+export function pdfResultKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(PDF_RESULTS[0].label, PDF_RESULTS[0].data)
+    .text(PDF_RESULTS[1].label, PDF_RESULTS[1].data)
+    .row()
+    .text(PDF_RESULTS[2].label, PDF_RESULTS[2].data)
+    .text(PDF_RESULTS[3].label, PDF_RESULTS[3].data);
+}
+
+export function feedbackSkipKeyboard(kind: "afb" | "pfb"): InlineKeyboard {
+  return new InlineKeyboard().text(FEEDBACK_SKIP, `${kind}_skip`);
+}
+
 export function csatKeyboard(): InlineKeyboard {
   const kb = new InlineKeyboard();
   for (let i = 1; i <= 5; i++) {

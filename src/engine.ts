@@ -7,6 +7,13 @@ import { replyPhotoStatic, replyStatic, sendStatic } from "./send";
 import { allowedToSend } from "./consents";
 import { DATA_CALLBACKS, handleDataCallback } from "./dataCommand";
 import {
+  FEEDBACK_CALLBACK_PREFIXES,
+  handleFeedbackCallback,
+  scheduleAnalysisFeedback,
+  schedulePdfFeedback,
+  takeFeedbackComment,
+} from "./feedback";
+import {
   remindAboutConsentOnce,
   remindAboutStuckConsults,
   startConsultRequest,
@@ -131,6 +138,12 @@ export async function handleIncoming(ctx: Context) {
     return handleDataCallback(ctx, callbackData);
   }
 
+  // Вопросы обратной связи приходят через сутки и через неделю, когда
+  // человек уже где угодно по сценарию, — разбираем их до стадий.
+  if (callbackData && FEEDBACK_CALLBACK_PREFIXES.some((p) => callbackData.startsWith(p))) {
+    return handleFeedbackCallback(ctx, callbackData);
+  }
+
   if (!(await allowedWithoutPdConsent(session, callbackData))) {
     return askPdConsentFirst(ctx, session);
   }
@@ -161,6 +174,11 @@ export async function handleIncoming(ctx: Context) {
   if (messageText === CONSULT_SELF_WRITE_BUTTON) {
     if (await takeConsultSelfWrite(ctx, session)) return;
   }
+
+  // Комментарий к вопросу обратной связи — обычное текстовое
+  // сообщение, поэтому ловим его до разбора по стадиям. Если ждать
+  // нечего, сообщение идёт дальше как раньше.
+  if (messageText && (await takeFeedbackComment(ctx, messageText))) return;
 
   // Кнопка «Прислать гид» живёт в ветке «не подходит», где сессия уже
   // вернулась в исходное состояние, — поэтому разбираем её до стадий.
@@ -1506,6 +1524,7 @@ async function handleDecline(ctx: Context, session: Session) {
     where: { telegramId: session.telegramId },
     data: { stage: "CSAT_RATING" },
   });
+  await logOfferEvent(session.telegramId, "csat_asked");
   return replyStatic(ctx, texts.csatPrompt, { reply_markup: csatKeyboard() });
 }
 
@@ -1582,7 +1601,8 @@ type OfferEventName =
   | "onb_go"
   | "quiz_q1"
   | "quiz_completed"
-  | "guide_sent";
+  | "guide_sent"
+  | "csat_asked";
 
 async function logOfferEvent(telegramId: bigint, type: OfferEventName) {
   await prisma.offerEvent
@@ -1741,6 +1761,9 @@ export async function approveAndSendPdf(api: Api, orderId: number): Promise<void
     where: { id: orderId },
     data: { status: "SENT", sentAt: new Date() },
   });
+
+  // Через неделю спросим, что изменилось со сном.
+  await schedulePdfFeedback(orderId, order.telegramId);
 }
 
 // ── Напоминания по заявкам на консультацию ──────────────────────────
@@ -1819,6 +1842,10 @@ async function markSentAndShowOffer(api: Api, telegramId: bigint, chatId: bigint
 
   await logOfferEvent(telegramId, "offer_shown");
   await sendOfferMessages(api, chatId);
+
+  // Через сутки спросим, узнал ли родитель в разборе своего малыша.
+  // Планируем здесь: это момент, когда разбор действительно ушёл.
+  await scheduleAnalysisFeedback(telegramId);
 }
 
 // Ручной путь (/send): два сообщения, собранные тобой в переписке с ботом.

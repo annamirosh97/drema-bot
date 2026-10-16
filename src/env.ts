@@ -83,4 +83,12 @@ export const env = {
   // которой человек пришёл сам. Флаг оставлен на случай, если юрист
   // решит иначе — тогда опрос тоже станет требовать согласия.
   FEEDBACK_REQUIRES_MARKETING: (process.env.FEEDBACK_REQUIRES_MARKETING ?? "") === "true",
+  // Отложенные вопросы обратной связи: через сколько спрашивать и в
+  // какие часы по Москве это допустимо. Окно общее для обоих вопросов:
+  // ночью такие сообщения приходить не должны.
+  FREE_ANALYSIS_FEEDBACK_DELAY_HOURS:
+    parseInt(process.env.FREE_ANALYSIS_FEEDBACK_DELAY_HOURS ?? "24", 10) || 24,
+  PDF_FEEDBACK_DELAY_DAYS: parseInt(process.env.PDF_FEEDBACK_DELAY_DAYS ?? "7", 10) || 7,
+  FEEDBACK_WINDOW_START: parseInt(process.env.FEEDBACK_WINDOW_START ?? "10", 10) || 10,
+  FEEDBACK_WINDOW_END: parseInt(process.env.FEEDBACK_WINDOW_END ?? "21", 10) || 21,
 };

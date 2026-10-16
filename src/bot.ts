@@ -6,6 +6,7 @@ import { registerAdminCommands, handleAdminFlowMessage } from "./admin";
 import { startAdminServer } from "./web/server";
 import { startReminders } from "./engine";
 import { startUpsellScheduler } from "./upsell";
+import { startFeedbackScheduler } from "./feedback";
 import { handleDataCommand, handleUnsubscribeCommand } from "./dataCommand";
 import { loadLegalDocuments } from "./legalDocs";
 import { countUsersWithoutPdConsent } from "./consents";
@@ -93,6 +94,8 @@ async function main() {
   startReminders(bot.api);
   // Предложение консультации со скидкой через пару минут после плана.
   startUpsellScheduler(bot.api);
+  // Отложенные вопросы: о разборе через сутки, о плане через неделю.
+  startFeedbackScheduler(bot.api);
   // Меню команд в интерфейсе Telegram. Только для обычных людей:
   // админские команды сюда не кладём, они и так известны.
   await bot.api

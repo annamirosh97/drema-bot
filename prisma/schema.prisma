@@ -167,8 +167,9 @@ model Order {
   paidAt            DateTime?
   refundedAt        DateTime?
 
-  session Session   @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
-  draft   PdfDraft?
+  session  Session      @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+  draft    PdfDraft?
+  feedback PdfFeedback?
 
   @@index([telegramId])
   @@index([status])
@@ -304,6 +305,76 @@ model SuppressedMessage {
   @@index([createdAt])
 }
 
+// ── Обратная связь ──────────────────────────────────────────────────
+//
+// Два отложенных вопроса: «узнали в разборе своего малыша?» через сутки
+// после бесплатного разбора и «как сейчас сон малыша?» через неделю
+// после плана. Оба живут по одним правилам — окно 10:00–21:00 по Москве
+// и не больше одного вопроса за сутки, — поэтому и устроены одинаково.
+//
+// Строка создаётся в момент, когда вопрос запланирован, и дальше её
+// двигает планировщик. askedAt заполняется при отправке, skipReason —
+// когда отправлять не стали.
+
+enum AnalysisRating {
+  YES
+  PARTLY
+  NO
+}
+
+model AnalysisFeedback {
+  id         Int             @id @default(autoincrement())
+  telegramId BigInt          @unique
+  scheduledAt DateTime
+  askedAt    DateTime?
+  rating     AnalysisRating?
+  comment    String?
+  skippedComment Boolean     @default(false)
+  answeredAt DateTime?
+  // Сообщение с просьбой о комментарии: по нему убираем кнопку
+  // «Пропустить», когда комментарий всё-таки пришёл.
+  promptMessageId Int?
+  skipReason String?
+  // Вопрос уже переносили из-за лимита одного вопроса в сутки. Второй
+  // раз не переносим: тогда спрашивать уже поздно.
+  limitDeferred Boolean      @default(false)
+  createdAt  DateTime        @default(now())
+
+  @@index([askedAt])
+  @@index([scheduledAt])
+}
+
+enum PdfResult {
+  BETTER
+  SAME
+  WORSE
+  NOT_STARTED
+}
+
+model PdfFeedback {
+  id         Int        @id @default(autoincrement())
+  orderId    Int        @unique
+  telegramId BigInt
+  scheduledAt DateTime
+  askedAt    DateTime?
+  result     PdfResult?
+  comment    String?
+  skippedComment Boolean @default(false)
+  answeredAt DateTime?
+  // Сообщение с просьбой о комментарии: по нему убираем кнопку
+  // «Пропустить», когда комментарий всё-таки пришёл.
+  promptMessageId Int?
+  skipReason String?
+  limitDeferred Boolean  @default(false)
+  createdAt  DateTime   @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([telegramId])
+  @@index([askedAt])
+  @@index([scheduledAt])
+}
+
 // Обезличенный счётчик по дням.
 //
 // Нужен там, где считать можно, а знать кто — нельзя: например, сколько
@@ -350,6 +421,21 @@ enum OfferEventType {
   quiz_q1
   quiz_completed
   guide_sent
+  // Вопросы обратной связи: оценка разбора через сутки и результат
+  // плана через неделю. По ним собирается статистика во втором заходе.
+  csat_asked
+  analysis_feedback_scheduled
+  analysis_feedback_asked
+  analysis_feedback_skipped
+  analysis_feedback_rated
+  analysis_feedback_comment
+  analysis_feedback_comment_skipped
+  pdf_feedback_scheduled
+  pdf_feedback_asked
+  pdf_feedback_skipped
+  pdf_feedback_answered
+  pdf_feedback_comment
+  pdf_feedback_comment_skipped
 }
 
 model OfferEvent {
