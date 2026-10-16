@@ -110,6 +110,9 @@ export interface ConsentCardData {
   firstName: string | null;
   current: { type: string; action: string | null; at: Date | null; version: string | null }[];
   history: ConsentRecordRow[];
+  // Обращение в поддержку, если человек писал. Ссылка нужна рядом с
+  // согласиями: это одно и то же место, куда идут за историей.
+  supportThreadId?: number | null;
   // true — страница для печати: без навигации и кнопок, с шапкой.
   forPrint?: boolean;
   printedAt?: Date;
@@ -187,6 +190,11 @@ export function renderConsentCard(data: ConsentCardData): string {
         <p class="muted">
           ${who} ·
           <a href="/admin/users/${data.telegramId}/consents/print" target="_blank">Выгрузить для проверки</a> ·
+          ${raw(
+            data.supportThreadId
+              ? html`<a href="/admin/support/${data.supportThreadId}">обращение в поддержку</a> · `
+              : ""
+          )}
           <a href="/admin/consents">к поиску</a>
         </p>`;
 

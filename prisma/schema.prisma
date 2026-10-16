@@ -375,6 +375,73 @@ model PdfFeedback {
   @@index([scheduledAt])
 }
 
+// ── Поддержка ───────────────────────────────────────────────────────
+//
+// Отдельный бот, та же база. На каждого родителя — своя тема в закрытой
+// группе; что написал он и что ответила поддержка, копируется сюда.
+//
+// Переписка — свободный текст, в ней может быть что угодно, в том числе
+// о здоровье. Обращаемся с ней как со свободным ответом анкеты: в модель
+// не передаём, меток по содержанию не ставим, при отзыве согласия
+// удаляем вместе с остальными данными человека.
+
+enum SupportStatus {
+  WAITING // последним написал родитель, ждёт ответа
+  ANSWERED // последней ответила поддержка
+  CLOSED // обращение закрыто
+}
+
+enum SupportDirection {
+  IN // от родителя
+  OUT // ответ поддержки
+  NOTE // внутренняя заметка, родителю не ушла
+}
+
+model SupportThread {
+  id         Int           @id @default(autoincrement())
+  telegramId BigInt        @unique
+  // Тема в группе. Пустая, пока группа не привязана: сообщения в это
+  // время копятся и переезжают в тему при привязке.
+  topicId    Int?
+  status     SupportStatus @default(WAITING)
+  // Параметр из /start, если родитель пришёл по ссылке с меткой.
+  source     String?
+  createdAt  DateTime      @default(now())
+  lastUserMessageAt    DateTime?
+  lastSupportMessageAt DateTime?
+  closedAt   DateTime?
+
+  messages SupportMessage[]
+
+  @@index([status])
+}
+
+model SupportMessage {
+  id              Int              @id @default(autoincrement())
+  threadId        Int
+  direction       SupportDirection
+  authorTelegramId BigInt
+  type            String // text | photo | voice | document | ...
+  text            String? // текст или подпись
+  fileId          String? // сам файл не скачиваем, храним ссылку Telegram
+  userMessageId   Int? // id сообщения в чате с родителем
+  groupMessageId  Int? // id сообщения в теме группы
+  deliveryError   String?
+  createdAt       DateTime         @default(now())
+
+  thread SupportThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId])
+}
+
+// Мелкие настройки, которые задаются в работе, а не переменными
+// окружения: сейчас это id группы поддержки, привязанной командой /bind.
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
 // Обезличенный счётчик по дням.
 //
 // Нужен там, где считать можно, а знать кто — нельзя: например, сколько

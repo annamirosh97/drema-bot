@@ -32,6 +32,15 @@ import {
   renderMarketingPage,
 } from "./consentPages";
 import { getConsentState } from "../consents";
+import {
+  SupportListData,
+  SupportRow,
+  SupportThreadData,
+  mean,
+  median,
+  renderSupportListPage,
+  renderSupportThreadPage,
+} from "./supportPages";
 
 // ── Авторизация ─────────────────────────────────────────────────────
 
@@ -181,7 +190,7 @@ async function loadConsentCard(rawId: string): Promise<ConsentCardData | null> {
     return null;
   }
 
-  const [session, request, records, documents] = await Promise.all([
+  const [session, request, records, documents, support] = await Promise.all([
     prisma.session.findUnique({ where: { telegramId } }),
     prisma.consultRequest.findFirst({
       where: { telegramId, parentUsername: { not: null } },
@@ -189,6 +198,7 @@ async function loadConsentCard(rawId: string): Promise<ConsentCardData | null> {
     }),
     prisma.consentRecord.findMany({ where: { telegramId }, orderBy: { createdAt: "asc" } }),
     prisma.legalDocument.findMany(),
+    prisma.supportThread.findUnique({ where: { telegramId } }),
   ]);
 
   // Карточку показываем и тому, у кого сессии уже нет: журнал её
@@ -202,6 +212,7 @@ async function loadConsentCard(rawId: string): Promise<ConsentCardData | null> {
     telegramId: String(telegramId),
     username: request?.parentUsername ?? null,
     firstName: session?.firstName ?? null,
+    supportThreadId: support?.id ?? null,
     current: Object.entries(state).map(([type, status]) => ({
       type,
       action: status.action,
@@ -265,6 +276,159 @@ async function marketingAudience(): Promise<MarketingRow[]> {
   return rows;
 }
 
+// ── Данные для страниц поддержки ────────────────────────────────────
+
+// Время до первого ответа: от первого сообщения родителя до первого
+// ответа поддержки. Заметки не считаются ответом — родитель их не видел.
+function firstReplyMs(messages: { direction: string; createdAt: Date }[]): number | null {
+  const firstIn = messages.find((m) => m.direction === "IN");
+  if (!firstIn) return null;
+  const firstOut = messages.find(
+    (m) => m.direction === "OUT" && m.createdAt >= firstIn.createdAt
+  );
+  return firstOut ? firstOut.createdAt.getTime() - firstIn.createdAt.getTime() : null;
+}
+
+// Имя берём из сессии основного бота, username — из заявки на
+// консультацию: больше его взять неоткуда, сессия его не хранит.
+async function supportIdentity(telegramId: bigint) {
+  const [session, request] = await Promise.all([
+    prisma.session.findUnique({ where: { telegramId } }),
+    prisma.consultRequest.findFirst({
+      where: { telegramId, parentUsername: { not: null } },
+      orderBy: { createdAt: "desc" },
+    }),
+  ]);
+  return { name: session?.firstName ?? null, username: request?.parentUsername ?? null };
+}
+
+async function loadSupportList(days: number): Promise<SupportListData> {
+  const since = new Date(Date.now() - days * 24 * 3_600_000);
+
+  const threads = await prisma.supportThread.findMany({
+    orderBy: { createdAt: "desc" },
+    take: 200,
+  });
+
+  const rows: SupportRow[] = [];
+  const replyTimes: number[] = [];
+  let inPeriod = 0;
+  let answeredInPeriod = 0;
+
+  for (const thread of threads) {
+    const [identity, messages] = await Promise.all([
+      supportIdentity(thread.telegramId),
+      prisma.supportMessage.findMany({
+        where: { threadId: thread.id },
+        orderBy: { createdAt: "asc" },
+        select: { direction: true, createdAt: true },
+      }),
+    ]);
+
+    const lastMessageAt =
+      [thread.lastUserMessageAt, thread.lastSupportMessageAt]
+        .filter((d): d is Date => d !== null)
+        .sort((a, b) => b.getTime() - a.getTime())[0] ?? null;
+
+    rows.push({
+      id: thread.id,
+      telegramId: String(thread.telegramId),
+      name: identity.name,
+      username: identity.username,
+      status: thread.status,
+      lastMessageAt,
+      waitingMs:
+        thread.status === "WAITING" && thread.lastUserMessageAt
+          ? Date.now() - thread.lastUserMessageAt.getTime()
+          : null,
+    });
+
+    if (thread.createdAt >= since) {
+      inPeriod++;
+      const reply = firstReplyMs(messages);
+      if (reply !== null) {
+        answeredInPeriod++;
+        replyTimes.push(reply);
+      }
+    }
+  }
+
+  // Сначала те, кто ждёт: именно они требуют действия. Внутри групп —
+  // по свежести последнего сообщения.
+  const order = { WAITING: 0, ANSWERED: 1, CLOSED: 2 } as Record<string, number>;
+  rows.sort((a, b) => {
+    const byStatus = (order[a.status] ?? 9) - (order[b.status] ?? 9);
+    if (byStatus) return byStatus;
+    return (b.lastMessageAt?.getTime() ?? 0) - (a.lastMessageAt?.getTime() ?? 0);
+  });
+
+  return {
+    rows,
+    days,
+    inPeriod,
+    answeredInPeriod,
+    firstReplyMean: mean(replyTimes),
+    firstReplyMedian: median(replyTimes),
+  };
+}
+
+async function loadSupportThread(id: number): Promise<SupportThreadData | null> {
+  const thread = await prisma.supportThread.findUnique({ where: { id } });
+  if (!thread) return null;
+
+  const [identity, messages, order, consult] = await Promise.all([
+    supportIdentity(thread.telegramId),
+    prisma.supportMessage.findMany({
+      where: { threadId: thread.id },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.order.findFirst({
+      where: { telegramId: thread.telegramId },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.consultRequest.findFirst({
+      where: { telegramId: thread.telegramId },
+      orderBy: { createdAt: "desc" },
+    }),
+  ]);
+
+  // Показываем только ссылки на существующие страницы: битая ссылка
+  // хуже её отсутствия.
+  const links: { label: string; url: string }[] = [];
+  const user = consentUrl(thread.telegramId);
+  if (user) links.push({ label: "пользователь и согласия", url: user });
+  if (order) {
+    const url = orderUrl(order.id);
+    if (url) links.push({ label: `заказ #${order.id}`, url });
+  }
+  if (consult) {
+    const url = consultUrl(consult.id);
+    if (url) links.push({ label: `заявка #${consult.id}`, url });
+  }
+
+  return {
+    id: thread.id,
+    telegramId: String(thread.telegramId),
+    name: identity.name,
+    username: identity.username,
+    status: thread.status,
+    source: thread.source,
+    createdAt: thread.createdAt,
+    closedAt: thread.closedAt,
+    firstReplyMs: firstReplyMs(messages),
+    messages: messages.map((m) => ({
+      id: m.id,
+      direction: m.direction,
+      type: m.type,
+      text: m.text,
+      fileId: m.fileId,
+      deliveryError: m.deliveryError,
+      createdAt: m.createdAt,
+    })),
+    links,
+  };
+}
+
 // ── Сервер ──────────────────────────────────────────────────────────
 
 export function startAdminServer(api: Api) {
@@ -313,7 +477,7 @@ export function startAdminServer(api: Api) {
 
   // Хостинг проверяет живость сервиса по корню — отвечаем без пароля.
   app.get("/", (_req, res) =>
-    res.send("Дрёма-бот жив. Админка — /admin/orders, /admin/consults и /admin/consents")
+    res.send("Дрёма-бот жив. Админка — /admin/orders, /admin/consults, /admin/consents и /admin/support")
   );
 
   app.get("/admin/orders", async (_req, res) => {
@@ -544,6 +708,19 @@ export function startAdminServer(api: Api) {
       .type("text/csv; charset=utf-8")
       .setHeader("Content-Disposition", "attachment; filename=marketing.csv");
     res.send(marketingCsv(await marketingAudience()));
+  });
+
+  // ── Поддержка ─────────────────────────────────────────────────────
+
+  app.get("/admin/support", async (req, res) => {
+    const days = Math.max(1, Number(req.query.days) || 14);
+    res.send(renderSupportListPage(await loadSupportList(days)));
+  });
+
+  app.get("/admin/support/:id", async (req, res) => {
+    const thread = await loadSupportThread(Number(req.params.id));
+    if (!thread) return res.status(404).send("Обращение не найдено.");
+    res.send(renderSupportThreadPage(thread));
   });
 
   // Без этого Express отдаёт в браузер стектрейс. Админке он ни к чему,

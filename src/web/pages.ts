@@ -47,7 +47,8 @@ export function renderOrdersPage(orders: OrderRow[]): string {
       <p class="muted">
         Жёлтым — ждут больше 12 часов, красным — больше 20 ·
         <a href="/admin/consults">заявки на консультацию</a> ·
-        <a href="/admin/consents">согласия</a>
+        <a href="/admin/consents">согласия</a> ·
+        <a href="/admin/support">поддержка</a>
       </p>
       <div class="card">${raw(body)}</div>`
   );

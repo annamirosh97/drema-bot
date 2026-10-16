@@ -91,4 +91,13 @@ export const env = {
   PDF_FEEDBACK_DELAY_DAYS: parseInt(process.env.PDF_FEEDBACK_DELAY_DAYS ?? "7", 10) || 7,
   FEEDBACK_WINDOW_START: parseInt(process.env.FEEDBACK_WINDOW_START ?? "10", 10) || 10,
   FEEDBACK_WINDOW_END: parseInt(process.env.FEEDBACK_WINDOW_END ?? "21", 10) || 21,
+  // Бот поддержки — отдельный бот в этом же процессе. Без токена он
+  // просто не поднимается, основной работает как обычно.
+  SUPPORT_BOT_TOKEN: process.env.SUPPORT_BOT_TOKEN ?? "",
+  // Кто может привязать группу и отвечать родителям. По умолчанию —
+  // админ основного бота.
+  SUPPORT_ADMIN_IDS: (process.env.SUPPORT_ADMIN_IDS || required("ADMIN_TELEGRAM_ID"))
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean),
 };

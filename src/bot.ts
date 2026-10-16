@@ -7,6 +7,7 @@ import { startAdminServer } from "./web/server";
 import { startReminders } from "./engine";
 import { startUpsellScheduler } from "./upsell";
 import { startFeedbackScheduler } from "./feedback";
+import { startSupportBot } from "./support/bot";
 import { handleDataCommand, handleUnsubscribeCommand } from "./dataCommand";
 import { loadLegalDocuments } from "./legalDocs";
 import { countUsersWithoutPdConsent } from "./consents";
@@ -96,6 +97,10 @@ async function main() {
   startUpsellScheduler(bot.api);
   // Отложенные вопросы: о разборе через сутки, о плане через неделю.
   startFeedbackScheduler(bot.api);
+  // Бот поддержки — отдельный бот в этом же процессе. Запускаем до
+  // bot.start(): тот не возвращается, пока основной бот живёт. Без
+  // токена поддержка просто не поднимается.
+  startSupportBot();
   // Меню команд в интерфейсе Telegram. Только для обычных людей:
   // админские команды сюда не кладём, они и так известны.
   await bot.api
