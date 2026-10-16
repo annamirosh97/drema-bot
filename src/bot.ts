@@ -74,6 +74,21 @@ bot.catch((err) => {
 
 async function main() {
   console.log("Дрёма-бот запускается...");
+
+  // Если у токена остался вебхук с прошлой жизни, long polling на нём
+  // не заработает: Telegram отдаст 409. Снимаем, но очередь
+  // накопленных обновлений не сбрасываем — терять чужие сообщения
+  // из-за нашего переезда незачем.
+  await bot.api
+    .deleteWebhook()
+    .catch((error) => console.error("Не удалось снять вебхук:", error));
+
+  if (env.ALLOWED_USER_IDS.length) {
+    console.log(
+      `Закрытый режим: отвечаю только ${env.ALLOWED_USER_IDS.join(", ")}. ` +
+        `Остальным — «Дрёма скоро откроется».`
+    );
+  }
   // Версии юридических документов нужны до первого онбординга: без них
   // согласие не записать, поэтому поднимаемся только с ними.
   await loadLegalDocuments();
@@ -112,9 +127,24 @@ async function main() {
     ])
     .catch((error) => console.error("Не удалось задать меню команд:", error));
 
-  await bot.start({
-    onStart: (botInfo) => console.log(`Бот @${botInfo.username} запущен и слушает сообщения (long polling).`),
-  });
+  await bot
+    .start({
+      onStart: (botInfo) =>
+        console.log(`Бот @${botInfo.username} запущен и слушает сообщения (long polling).`),
+    })
+    .catch((error) => {
+      // 409 значит, что этим же токеном уже кто-то пользуется: второй
+      // деплой, локальный запуск или не снятый вебхук. Сообщение
+      // Telegram об этом невнятное, поэтому говорим прямо.
+      const description = (error as { description?: string })?.description ?? String(error);
+      if (/409|terminated by other|Conflict/i.test(description)) {
+        console.error(
+          "Этот токен уже используется другим процессом: проверь, не запущен ли бот " +
+            "локально или вторым деплоем. Два экземпляра с одним токеном работать не могут."
+        );
+      }
+      throw error;
+    });
 }
 
 main().catch((err) => {

@@ -27,6 +27,7 @@ import { env } from "./env";
 import { texts } from "./texts";
 import { replyStatic, sendStatic } from "./send";
 import { allowedToSend } from "./consents";
+import { isAllowed } from "./engine";
 import { orderUrl } from "./web/server";
 import {
   ANALYSIS_RATINGS,
@@ -138,6 +139,16 @@ async function decide(
   return { kind: "send" };
 }
 
+// Ошибка, после которой повторять отправку бессмысленно: человек
+// остановил бота, удалил аккаунт или чата просто нет. Остальные
+// (таймаут, 500 от Telegram) — временные, их надо повторить.
+export function isPermanentSendError(error: unknown): boolean {
+  const description = (error as { description?: string })?.description ?? String(error);
+  return /bot was blocked|user is deactivated|chat not found|bot can't initiate|Forbidden/i.test(
+    description
+  );
+}
+
 async function logEvent(telegramId: bigint, type: string) {
   await prisma.offerEvent
     .create({ data: { telegramId, type: type as never } })
@@ -213,6 +224,13 @@ async function sendDueAnalysisFeedback(api: Api) {
         continue;
       }
 
+      // В закрытом режиме отложенные вопросы тем, кого нет в списке,
+      // не уходят: бот только что сказал им «скоро откроется».
+      if (!isAllowed(row.telegramId)) {
+        await skipAnalysis(row.id, row.telegramId, "закрытый режим");
+        continue;
+      }
+
       const verdict = await decide(row.telegramId, "analysis", row.limitDeferred);
       if (verdict.kind === "skip") {
         await skipAnalysis(row.id, row.telegramId, verdict.reason);
@@ -245,6 +263,11 @@ async function sendDueAnalysisFeedback(api: Api) {
       await logEvent(row.telegramId, "analysis_feedback_asked");
     } catch (error) {
       console.error(`Не удалось спросить о разборе у #${row.telegramId}:`, error);
+      // Иначе планировщик будет долбиться в заблокировавшего бота
+      // каждую минуту до скончания времён.
+      if (isPermanentSendError(error)) {
+        await skipAnalysis(row.id, row.telegramId, "родитель остановил бота");
+      }
     }
   }
 }
@@ -258,6 +281,11 @@ async function sendDuePdfFeedback(api: Api) {
 
   for (const row of due) {
     try {
+      if (!isAllowed(row.telegramId)) {
+        await skipPdf(row.id, row.telegramId, "закрытый режим");
+        continue;
+      }
+
       const verdict = await decide(row.telegramId, "pdf", row.limitDeferred);
       if (verdict.kind === "skip") {
         await skipPdf(row.id, row.telegramId, verdict.reason);
@@ -286,6 +314,9 @@ async function sendDuePdfFeedback(api: Api) {
       await logEvent(row.telegramId, "pdf_feedback_asked");
     } catch (error) {
       console.error(`Не удалось спросить о плане по заказу #${row.orderId}:`, error);
+      if (isPermanentSendError(error)) {
+        await skipPdf(row.id, row.telegramId, "родитель остановил бота");
+      }
     }
   }
 }

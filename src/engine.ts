@@ -113,6 +113,13 @@ export async function handleIncoming(ctx: Context) {
   const from = ctx.from;
   if (!from || !ctx.chat) return;
 
+  // Закрытый режим — самое первое, что проверяется: сессию и любые
+  // другие следы заводить нельзя, пока человек не в списке.
+  if (!isAllowed(from.id)) {
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
+    return replyStatic(ctx, texts.notOpenYet);
+  }
+
   const telegramId = BigInt(from.id);
   const chatId = BigInt(ctx.chat.id);
   const session = await getOrCreateSession(telegramId, chatId, from.first_name);
@@ -229,6 +236,15 @@ export async function handleIncoming(ctx: Context) {
     case "RED_FLAG_ENDED":
       return resetToWelcomeAndSend(ctx, session);
   }
+}
+
+// ── Закрытый режим ──────────────────────────────────────────────────
+
+// Пустой список значит «бот открыт». Админ в списке всегда: иначе бот
+// можно закрыть и от себя тоже (см. env.ts).
+export function isAllowed(telegramId: number | bigint): boolean {
+  if (!env.ALLOWED_USER_IDS.length) return true;
+  return env.ALLOWED_USER_IDS.includes(String(telegramId));
 }
 
 // ── Воронка онбординга ──────────────────────────────────────────────

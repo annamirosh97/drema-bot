@@ -16,6 +16,8 @@ import { env } from "./env";
 import { formatPrice, texts } from "./texts";
 import { startConsultRequest } from "./consult";
 import { allowedToSend } from "./consents";
+import { isAllowed } from "./engine";
+import { isPermanentSendError } from "./feedback";
 import { escapeHtml, replyStatic, sendStatic } from "./send";
 import {
   upsellCardKeyboard,
@@ -125,12 +127,23 @@ export async function sendDueUpsells(api: Api) {
     done.add(key);
 
     try {
+      if (!isAllowed(order.telegramId)) continue;
       // Это предложение, а не то, за чем человек пришёл: без согласия
       // на рассылку оно не уходит, и отказ записывается.
       if (!(await allowedToSend(order.telegramId, "MARKETING", "upsell_offer"))) continue;
       await sendUpsell(api, order.id, order.telegramId);
     } catch (error) {
       console.error(`Не удалось отправить предложение по заказу #${order.id}:`, error);
+      // Строка уже создана, так что повтора не будет и без пометки, но
+      // без неё непонятно, почему предложение так и не ушло.
+      if (isPermanentSendError(error)) {
+        await prisma.upsellOffer
+          .update({
+            where: { telegramId: order.telegramId },
+            data: { skipReason: "родитель остановил бота" },
+          })
+          .catch(() => {});
+      }
     }
   }
 }

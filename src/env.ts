@@ -93,6 +93,22 @@ export const env = {
   FEEDBACK_WINDOW_END: parseInt(process.env.FEEDBACK_WINDOW_END ?? "21", 10) || 21,
   // Бот поддержки — отдельный бот в этом же процессе. Без токена он
   // просто не поднимается, основной работает как обычно.
+  // Username основного бота без «@»: подставляется там, где на него
+  // нужно сослаться, например в приветствии поддержки.
+  MAIN_BOT_USERNAME: (process.env.MAIN_BOT_USERNAME ?? "drema_sleep_bot").replace(/^@/, ""),
+  // Закрытый режим. Пусто — бот открыт для всех. Если список задан,
+  // всем остальным бот отвечает, что скоро откроется, и больше ничего
+  // не делает и не сохраняет. Админ проходит всегда: иначе бот можно
+  // закрыть и от себя.
+  ALLOWED_USER_IDS: (() => {
+    const ids = (process.env.ALLOWED_USER_IDS ?? "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+    if (!ids.length) return [];
+    const admin = required("ADMIN_TELEGRAM_ID");
+    return ids.includes(admin) ? ids : [...ids, admin];
+  })(),
   SUPPORT_BOT_TOKEN: process.env.SUPPORT_BOT_TOKEN ?? "",
   // Кто может привязать группу и отвечать родителям. По умолчанию —
   // админ основного бота.
