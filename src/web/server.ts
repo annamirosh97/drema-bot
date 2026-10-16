@@ -22,6 +22,16 @@ import { ConsultStatusChange, buildConsultPackage, setConsultStatus } from "../c
 import type { LegalDocType } from "@prisma/client";
 import { activeDocument, readLegalText } from "../legalDocs";
 import { renderLegalPage } from "./legalPage";
+import {
+  ConsentCardData,
+  ConsentSearchRow,
+  MarketingRow,
+  marketingCsv,
+  renderConsentCard,
+  renderConsentSearchPage,
+  renderMarketingPage,
+} from "./consentPages";
+import { getConsentState } from "../consents";
 
 // ── Авторизация ─────────────────────────────────────────────────────
 
@@ -97,6 +107,164 @@ function parseScheduleVariants(body: Record<string, unknown>): ScheduleVariant[]
   return variants;
 }
 
+// ── Данные для страниц согласий ─────────────────────────────────────
+
+// Короткая подпись состояния для списков.
+function shortStatus(action: string | null): string {
+  if (action === "GRANTED") return "дано";
+  if (action === "REVOKED") return "отозвано";
+  if (action === "DECLINED") return "отказ";
+  return "нет записей";
+}
+
+// Поиск по telegram id или username. Числовой запрос ищем по id,
+// остальное — по username, без учёта регистра и ведущей «@».
+async function searchUsers(query: string): Promise<ConsentSearchRow[]> {
+  const username = query.replace(/^@/, "");
+  const asId = /^\d+$/.test(query) ? BigInt(query) : null;
+
+  const sessions = await prisma.session.findMany({
+    where: asId
+      ? { telegramId: asId }
+      : { firstName: { contains: username, mode: "insensitive" } },
+    take: 50,
+    orderBy: { updatedAt: "desc" },
+  });
+
+  // username лежит не в сессии, а в заявках на консультацию: там он
+  // сохраняется в момент записи. Поэтому ищем и по ним.
+  const byUsername = asId
+    ? []
+    : await prisma.consultRequest.findMany({
+        where: { parentUsername: { equals: username, mode: "insensitive" } },
+        distinct: ["telegramId"],
+        take: 50,
+      });
+
+  const ids = new Set<string>();
+  for (const row of [...sessions, ...byUsername]) ids.add(String(row.telegramId));
+
+  const rows: ConsentSearchRow[] = [];
+  for (const id of ids) {
+    const telegramId = BigInt(id);
+    const [session, request, state] = await Promise.all([
+      prisma.session.findUnique({ where: { telegramId } }),
+      prisma.consultRequest.findFirst({
+        where: { telegramId, parentUsername: { not: null } },
+        orderBy: { createdAt: "desc" },
+      }),
+      getConsentState(telegramId),
+    ]);
+
+    const dates = Object.values(state)
+      .map((s) => s.at)
+      .filter((d): d is Date => d !== null);
+
+    rows.push({
+      telegramId: id,
+      username: request?.parentUsername ?? null,
+      firstName: session?.firstName ?? null,
+      pdStatus: shortStatus(state.PD_PROCESSING.action),
+      marketingStatus: shortStatus(state.MARKETING.action),
+      lastActionAt: dates.length ? new Date(Math.max(...dates.map((d) => d.getTime()))) : null,
+    });
+  }
+
+  return rows;
+}
+
+async function loadConsentCard(rawId: string): Promise<ConsentCardData | null> {
+  let telegramId: bigint;
+  try {
+    telegramId = BigInt(rawId);
+  } catch {
+    return null;
+  }
+
+  const [session, request, records, documents] = await Promise.all([
+    prisma.session.findUnique({ where: { telegramId } }),
+    prisma.consultRequest.findFirst({
+      where: { telegramId, parentUsername: { not: null } },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.consentRecord.findMany({ where: { telegramId }, orderBy: { createdAt: "asc" } }),
+    prisma.legalDocument.findMany(),
+  ]);
+
+  // Карточку показываем и тому, у кого сессии уже нет: журнал её
+  // переживает, и именно это чаще всего и нужно проверяющей стороне.
+  if (!session && !records.length) return null;
+
+  const byId = new Map(documents.map((d) => [d.id, d]));
+  const state = await getConsentState(telegramId);
+
+  return {
+    telegramId: String(telegramId),
+    username: request?.parentUsername ?? null,
+    firstName: session?.firstName ?? null,
+    current: Object.entries(state).map(([type, status]) => ({
+      type,
+      action: status.action,
+      at: status.at,
+      version:
+        status.record?.documentIds.map((id) => byId.get(id)?.version).filter(Boolean).join(", ") ||
+        null,
+    })),
+    history: records.map((record) => ({
+      id: record.id,
+      type: record.type,
+      action: record.action,
+      source: record.source,
+      buttonText: record.buttonText,
+      messageText: record.messageText,
+      createdAt: record.createdAt,
+      documents: record.documentIds
+        .map((id) => byId.get(id))
+        .filter((d): d is NonNullable<typeof d> => Boolean(d))
+        .map((d) => ({ id: d.id, type: d.type, version: d.version, url: d.url })),
+      relatedOrderId: record.relatedOrderId,
+      relatedConsultRequestId: record.relatedConsultRequestId,
+    })),
+  };
+}
+
+// Кто сейчас может попадать в рассылки: последняя запись типа MARKETING
+// у человека — GRANTED. Считаем по журналу, а не по флажку, потому что
+// флажка нет: состояние всегда выводится из записей.
+async function marketingAudience(): Promise<MarketingRow[]> {
+  const records = await prisma.consentRecord.findMany({
+    where: { type: "MARKETING" },
+    orderBy: { createdAt: "desc" },
+  });
+  const documents = new Map((await prisma.legalDocument.findMany()).map((d) => [d.id, d]));
+
+  const seen = new Set<string>();
+  const rows: MarketingRow[] = [];
+
+  for (const record of records) {
+    const key = String(record.telegramId);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (record.action !== "GRANTED") continue;
+
+    const request = await prisma.consultRequest.findFirst({
+      where: { telegramId: record.telegramId, parentUsername: { not: null } },
+      orderBy: { createdAt: "desc" },
+    });
+
+    rows.push({
+      telegramId: key,
+      username: request?.parentUsername ?? null,
+      grantedAt: record.createdAt,
+      version:
+        record.documentIds.map((id) => documents.get(id)?.version).filter(Boolean).join(", ") ||
+        null,
+    });
+  }
+
+  return rows;
+}
+
 // ── Сервер ──────────────────────────────────────────────────────────
 
 export function startAdminServer(api: Api) {
@@ -145,7 +313,7 @@ export function startAdminServer(api: Api) {
 
   // Хостинг проверяет живость сервиса по корню — отвечаем без пароля.
   app.get("/", (_req, res) =>
-    res.send("Дрёма-бот жив. Админка — /admin/orders и /admin/consults")
+    res.send("Дрёма-бот жив. Админка — /admin/orders, /admin/consults и /admin/consents")
   );
 
   app.get("/admin/orders", async (_req, res) => {
@@ -343,6 +511,41 @@ export function startAdminServer(api: Api) {
     res.redirect(`/admin/consults/${id}?status=1`);
   });
 
+  // ── Согласия ──────────────────────────────────────────────────────
+  //
+  // Страницы только читают: ни одной формы, которая что-то меняет в
+  // журнале, здесь нет и быть не должно.
+
+  app.get("/admin/consents", async (req, res) => {
+    const query = String(req.query.q ?? "").trim();
+    res.send(renderConsentSearchPage(query, query ? await searchUsers(query) : []));
+  });
+
+  app.get("/admin/users/:telegramId/consents", async (req, res) => {
+    const card = await loadConsentCard(req.params.telegramId);
+    if (!card) return res.status(404).send("Пользователь не найден.");
+    res.send(renderConsentCard(card));
+  });
+
+  // Версия для печати: та же таблица, но с шапкой и без навигации —
+  // её и показывают проверяющей стороне.
+  app.get("/admin/users/:telegramId/consents/print", async (req, res) => {
+    const card = await loadConsentCard(req.params.telegramId);
+    if (!card) return res.status(404).send("Пользователь не найден.");
+    res.send(renderConsentCard({ ...card, forPrint: true, printedAt: new Date() }));
+  });
+
+  app.get("/admin/marketing", async (_req, res) => {
+    res.send(renderMarketingPage(await marketingAudience()));
+  });
+
+  app.get("/admin/marketing.csv", async (_req, res) => {
+    res
+      .type("text/csv; charset=utf-8")
+      .setHeader("Content-Disposition", "attachment; filename=marketing.csv");
+    res.send(marketingCsv(await marketingAudience()));
+  });
+
   // Без этого Express отдаёт в браузер стектрейс. Админке он ни к чему,
   // а в логах он останется.
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -371,4 +574,10 @@ export function orderUrl(orderId: number): string | null {
 
 export function consultUrl(requestId: number): string | null {
   return env.PUBLIC_BASE_URL ? `${env.PUBLIC_BASE_URL}/admin/consults/${requestId}` : null;
+}
+
+export function consentUrl(telegramId: bigint): string | null {
+  return env.PUBLIC_BASE_URL
+    ? `${env.PUBLIC_BASE_URL}/admin/users/${telegramId}/consents`
+    : null;
 }

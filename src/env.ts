@@ -78,4 +78,9 @@ export const env = {
   PRIVACY_POLICY_URL: legalUrl("PRIVACY_POLICY_URL", "/privacy"),
   PD_CONSENT_URL: legalUrl("PD_CONSENT_URL", "/consent"),
   MARKETING_CONSENT_URL: legalUrl("MARKETING_CONSENT_URL", "/marketing-consent"),
+  // Требовать ли согласие на рассылку для опросов о впечатлениях (CSAT).
+  // По умолчанию нет: это не реклама, а вопрос о качестве услуги, за
+  // которой человек пришёл сам. Флаг оставлен на случай, если юрист
+  // решит иначе — тогда опрос тоже станет требовать согласия.
+  FEEDBACK_REQUIRES_MARKETING: (process.env.FEEDBACK_REQUIRES_MARKETING ?? "") === "true",
 };

@@ -15,13 +15,56 @@ import type { ConsultRequest, ConsultSource, Session } from "@prisma/client";
 import { prisma } from "./prisma";
 import { env } from "./env";
 import { formatPrice, texts } from "./texts";
+import { ConsentInput, recordConsent } from "./consents";
 import { buildPrepText } from "./prep";
-import { consultConsentKeyboard } from "./keyboards";
+import { CONSULT_SELF_WRITE_BUTTON, consultConsentKeyboard } from "./keyboards";
 import { escapeHtml, replyStatic } from "./send";
 
 // Заявки в этих статусах считаются живыми: пока такая есть, вторую не
 // создаём. DONE и CANCELED не мешают записаться заново.
 const OPEN_STATUSES = ["NEW", "CONTACTED"] as const;
+
+// Пишет согласие и, если не вышло, честно говорит об этом человеку.
+// Возвращает false — значит, действие выполнять нельзя: согласие,
+// которого нет в журнале, для проверяющей стороны не существует.
+async function saveConsent(ctx: Context, input: ConsentInput): Promise<boolean> {
+  try {
+    await recordConsent(input);
+    return true;
+  } catch (error) {
+    console.error(`Не удалось записать согласие ${input.type} для #${input.telegramId}:`, error);
+    await replyStatic(ctx, texts.consentSaveFailed).catch(() => {});
+    return false;
+  }
+}
+
+// Передача данных специалисту — отдельное согласие: Софии уходят не
+// только контакт, но и анкета, разбор и план. Пакет не отправляется,
+// пока этой записи нет.
+async function recordSpecialistTransfer(
+  ctx: Context,
+  telegramId: bigint,
+  requestId: number,
+  buttonText: string
+): Promise<boolean> {
+  return saveConsent(ctx, {
+    telegramId,
+    type: "SPECIALIST_TRANSFER",
+    action: "GRANTED",
+    source: "CONSULT_SIGNUP",
+    documents: ["PD_CONSENT"],
+    messageText: consultConsentText(),
+    buttonText,
+    telegramMessageId: ctx.callbackQuery?.message?.message_id,
+    relatedConsultRequestId: requestId,
+  });
+}
+
+// В сообщении о контакте стоит ссылка на согласие — адрес приходит из
+// переменных окружения и в HTML должен быть обезврежен.
+export function consultConsentText(): string {
+  return texts.consultConsent(escapeHtml(env.PD_CONSENT_URL));
+}
 
 function adminChatId(): number {
   return Number(env.ADMIN_TELEGRAM_ID);
@@ -49,6 +92,9 @@ export interface ConsultOrigin {
   priceRub?: number;
   source?: ConsultSource;
   orderId?: number;
+  // Текст карточки, в которой человек нажал «Записаться». Уходит в
+  // журнал как то, что он видел, принимая условия оферты.
+  cardText?: string;
 }
 
 // Создаёт заявку и коротко сообщает админу. Пакет не отправляет: ждём
@@ -107,6 +153,22 @@ export async function startConsultRequest(
 
   const request = await createConsultRequest(ctx.api, session.telegramId, username, origin);
 
+  // Условия оферты написаны в карточке, над кнопкой с ценой: нажатие и
+  // есть их принятие. Источник и текст карточки зависят от того, откуда
+  // человек записался — из основного оффера или из предложения со
+  // скидкой после покупки плана.
+  await saveConsent(ctx, {
+    telegramId: session.telegramId,
+    type: "OFFER_ACCEPTANCE",
+    action: "GRANTED",
+    source: origin.source === "AFTER_PDF" ? "UPSELL" : "CONSULT_SIGNUP",
+    documents: ["OFFER"],
+    messageText: origin.cardText ?? "",
+    buttonText: `Записаться за ${formatPrice(request.priceRub)} ₽`,
+    telegramMessageId: ctx.callbackQuery?.message?.message_id,
+    relatedConsultRequestId: request.id,
+  });
+
   if (!username) {
     // Без username специалист родителя не найдёт, передавать нечего:
     // первым пишет родитель, и пакет можно отправлять сразу.
@@ -114,8 +176,14 @@ export async function startConsultRequest(
       where: { id: request.id },
       data: { firstContact: "PARENT" },
     });
+    const transferred = await recordSpecialistTransfer(
+      ctx,
+      session.telegramId,
+      request.id,
+      "без username — пакет уходит специалисту, первым пишет родитель"
+    );
     await replyStatic(ctx, texts.consultAcceptedNoUsername(escapeHtml(env.SPECIALIST_USERNAME), request.id));
-    await sendConsultPackage(ctx.api, request.id);
+    if (transferred) await sendConsultPackage(ctx.api, request.id);
     return request;
   }
 
@@ -123,7 +191,7 @@ export async function startConsultRequest(
     where: { telegramId: session.telegramId },
     data: { stage: "CONSULT_CONSENT" },
   });
-  await replyStatic(ctx, texts.consultConsent, { reply_markup: consultConsentKeyboard() });
+  await replyStatic(ctx, consultConsentText(), { reply_markup: consultConsentKeyboard() });
   return request;
 }
 
@@ -175,10 +243,17 @@ export async function takeConsultContact(
 
   // remove_keyboard — чтобы клавиатура согласия не висела внизу чата
   // после того, как выбор сделан.
+  const transferred = await recordSpecialistTransfer(
+    ctx,
+    session.telegramId,
+    request.id,
+    "Поделиться контактом"
+  );
+
   await replyStatic(ctx, texts.consultAccepted(escapeHtml(env.SPECIALIST_USERNAME)), {
     reply_markup: { remove_keyboard: true },
   });
-  await sendConsultPackage(ctx.api, request.id);
+  if (transferred) await sendConsultPackage(ctx.api, request.id);
   return true;
 }
 
@@ -194,10 +269,17 @@ export async function takeConsultSelfWrite(ctx: Context, session: Session): Prom
   });
   await leaveConsentStage(session.telegramId, session.stage);
 
+  const transferred = await recordSpecialistTransfer(
+    ctx,
+    session.telegramId,
+    request.id,
+    CONSULT_SELF_WRITE_BUTTON
+  );
+
   await replyStatic(ctx, texts.consultSelfWrite(escapeHtml(env.SPECIALIST_USERNAME), request.id), {
     reply_markup: { remove_keyboard: true },
   });
-  await sendConsultPackage(ctx.api, request.id);
+  if (transferred) await sendConsultPackage(ctx.api, request.id);
   return true;
 }
 
@@ -215,7 +297,7 @@ export async function remindAboutConsentOnce(ctx: Context, session: Session) {
   if (nudged.has(key)) return replyStatic(ctx, texts.genericFallback);
 
   nudged.add(key);
-  return replyStatic(ctx, texts.consultConsent, { reply_markup: consultConsentKeyboard() });
+  return replyStatic(ctx, consultConsentText(), { reply_markup: consultConsentKeyboard() });
 }
 
 // ── Пакет заявки для админа и специалиста ───────────────────────────

@@ -18,6 +18,7 @@ import type {
   LegalDocType,
 } from "@prisma/client";
 import { prisma } from "./prisma";
+import { env } from "./env";
 import { activeDocumentIds } from "./legalDocs";
 
 export interface ConsentInput {
@@ -125,6 +126,105 @@ const TYPE_LABELS: Record<ConsentType, string> = {
 
 export function consentTypeLabel(type: ConsentType): string {
   return TYPE_LABELS[type] ?? type;
+}
+
+// ── Можно ли писать человеку ────────────────────────────────────────
+//
+// Категория есть у каждого сообщения, которое бот отправляет по своей
+// инициативе — то есть не в ответ на нажатие или сообщение человека.
+// Через canSend проходят все такие отправки, и решение принимается в
+// момент отправки, а не когда её запланировали: за эти минуты человек
+// мог отписаться.
+
+export type MessageCategory = "SERVICE" | "FEEDBACK" | "FOLLOWUP" | "MARKETING";
+
+const CATEGORY_LABELS: Record<MessageCategory, string> = {
+  SERVICE: "то, за чем человек пришёл: разбор, план, сообщения по заказу",
+  FEEDBACK: "вопрос о впечатлениях",
+  FOLLOWUP: "проверка «как дела» после разбора или плана",
+  MARKETING: "предложения и рассылки",
+};
+
+export function categoryLabel(category: MessageCategory): string {
+  return CATEGORY_LABELS[category] ?? category;
+}
+
+export interface SendDecision {
+  allowed: boolean;
+  reason?: string;
+}
+
+// Решение по одному сообщению.
+//
+// Два правила, и первое важнее: если человек не дал или отозвал
+// согласие на обработку данных, бот молчит совсем. Отвечать на его
+// собственные действия это не мешает — через canSend такие ответы не
+// проходят.
+export async function canSend(
+  telegramId: bigint,
+  category: MessageCategory
+): Promise<SendDecision> {
+  const state = await getConsentState(telegramId);
+
+  if (!isGranted(state.PD_PROCESSING)) {
+    return { allowed: false, reason: "нет согласия на обработку данных" };
+  }
+
+  const needsMarketing =
+    category === "MARKETING" ||
+    category === "FOLLOWUP" ||
+    (category === "FEEDBACK" && env.FEEDBACK_REQUIRES_MARKETING);
+
+  if (needsMarketing && !isGranted(state.MARKETING)) {
+    return { allowed: false, reason: "нет согласия на рассылку" };
+  }
+
+  return { allowed: true };
+}
+
+// Записывает, что сообщение не ушло. Нужна, чтобы потом было видно:
+// человек не получил предложение не по сбою, а потому что отказался.
+// Сбой самой записи не должен ничего ронять — это статистика.
+export async function logSuppressed(
+  telegramId: bigint,
+  category: MessageCategory,
+  kind: string
+): Promise<void> {
+  try {
+    await prisma.suppressedMessage.create({ data: { telegramId, category, kind } });
+  } catch (error) {
+    console.error(`Не удалось записать подавленное сообщение ${kind}:`, error);
+  }
+}
+
+// Проверка и запись одним движением: так ни одна инициативная отправка
+// не потеряет отметку о том, почему её не было.
+export async function allowedToSend(
+  telegramId: bigint,
+  category: MessageCategory,
+  kind: string
+): Promise<boolean> {
+  const decision = await canSend(telegramId, category);
+  if (decision.allowed) return true;
+
+  console.log(`Не отправляю ${kind} пользователю #${telegramId}: ${decision.reason}.`);
+  await logSuppressed(telegramId, category, kind);
+  return false;
+}
+
+// ── Даты для человека ───────────────────────────────────────────────
+
+// Время показываем по Москве: бот русскоязычный, а контейнер живёт в
+// UTC, и «14.10.2026 12:42» без поправки сбивало бы с толку.
+const MOSCOW_OFFSET_MS = 3 * 60 * 60 * 1000;
+
+export function formatMoscow(date: Date, withSeconds = false): string {
+  const m = new Date(date.getTime() + MOSCOW_OFFSET_MS);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const time =
+    `${pad(m.getUTCHours())}:${pad(m.getUTCMinutes())}` +
+    (withSeconds ? `:${pad(m.getUTCSeconds())}` : "");
+  return `${pad(m.getUTCDate())}.${pad(m.getUTCMonth() + 1)}.${m.getUTCFullYear()} ${time} (мск)`;
 }
 
 // ── Те, кто пользовался ботом до появления согласий ─────────────────

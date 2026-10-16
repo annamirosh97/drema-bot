@@ -6,6 +6,7 @@ import { registerAdminCommands, handleAdminFlowMessage } from "./admin";
 import { startAdminServer } from "./web/server";
 import { startReminders } from "./engine";
 import { startUpsellScheduler } from "./upsell";
+import { handleDataCommand, handleUnsubscribeCommand } from "./dataCommand";
 import { loadLegalDocuments } from "./legalDocs";
 import { countUsersWithoutPdConsent } from "./consents";
 
@@ -31,6 +32,12 @@ bot.command("start", (ctx) => handleIncoming(ctx));
 // /reset — вернуться в начало бота. Доступна всем: обычный
 // пользователь тоже может захотеть пройти анкету заново.
 bot.command("reset", (ctx) => handleResetCommand(ctx));
+
+// /data и /unsubscribe работают в любом состоянии, в том числе когда
+// согласие на обработку данных отозвано: иначе отзыв был бы дверью без
+// ручки — ни посмотреть своё состояние, ни передумать.
+bot.command("data", (ctx) => handleDataCommand(ctx));
+bot.command("unsubscribe", (ctx) => handleUnsubscribeCommand(ctx));
 
 // /goto <номер> — прыжок на конкретный вопрос. Только для админа:
 // обычному пользователю прыжки по анкете оставят её с дырами, и разбор
@@ -86,6 +93,17 @@ async function main() {
   startReminders(bot.api);
   // Предложение консультации со скидкой через пару минут после плана.
   startUpsellScheduler(bot.api);
+  // Меню команд в интерфейсе Telegram. Только для обычных людей:
+  // админские команды сюда не кладём, они и так известны.
+  await bot.api
+    .setMyCommands([
+      { command: "start", description: "Начать заново" },
+      { command: "data", description: "Мои согласия и данные" },
+      { command: "unsubscribe", description: "Отписаться от рассылки" },
+      { command: "reset", description: "Пройти анкету с чистого листа" },
+    ])
+    .catch((error) => console.error("Не удалось задать меню команд:", error));
+
   await bot.start({
     onStart: (botInfo) => console.log(`Бот @${botInfo.username} запущен и слушает сообщения (long polling).`),
   });

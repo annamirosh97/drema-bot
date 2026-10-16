@@ -15,7 +15,8 @@ import { prisma } from "./prisma";
 import { env } from "./env";
 import { formatPrice, texts } from "./texts";
 import { startConsultRequest } from "./consult";
-import { replyStatic, sendStatic } from "./send";
+import { allowedToSend } from "./consents";
+import { escapeHtml, replyStatic, sendStatic } from "./send";
 import {
   upsellCardKeyboard,
   upsellExpiredKeyboard,
@@ -49,6 +50,11 @@ export function expiryFor(sentAt: Date, days = env.UPSELL_VALID_DAYS): Date {
 export function formatOfferDate(expiresAt: Date): string {
   const moscow = new Date(expiresAt.getTime() + MOSCOW_OFFSET_MS);
   return `${moscow.getUTCDate()} ${MONTHS[moscow.getUTCMonth()]}`;
+}
+
+// Ссылка на оферту: подставляется в карточки, где её принимают нажатием.
+function offerUrl(): string {
+  return escapeHtml(env.OFFER_URL);
 }
 
 function price(): string {
@@ -119,6 +125,9 @@ export async function sendDueUpsells(api: Api) {
     done.add(key);
 
     try {
+      // Это предложение, а не то, за чем человек пришёл: без согласия
+      // на рассылку оно не уходит, и отказ записывается.
+      if (!(await allowedToSend(order.telegramId, "MARKETING", "upsell_offer"))) continue;
       await sendUpsell(api, order.id, order.telegramId);
     } catch (error) {
       console.error(`Не удалось отправить предложение по заказу #${order.id}:`, error);
@@ -148,7 +157,7 @@ async function sendUpsell(api: Api, orderId: number, telegramId: bigint) {
   const message = await sendStatic(
     api,
     session.chatId,
-    texts.upsellOffer(price(), fullPrice(offer), formatOfferDate(offer.expiresAt)),
+    texts.upsellOffer(price(), fullPrice(offer), formatOfferDate(offer.expiresAt), offerUrl()),
     { reply_markup: upsellOfferKeyboard(price()) }
   );
 
@@ -197,7 +206,7 @@ export async function handleUpsell(ctx: Context, session: Session, callbackData:
     await logUpsellEvent(session.telegramId, "upsell_details");
     return replaceWithCard(
       ctx,
-      texts.upsellConsultCard(price(), fullPrice(offer), date),
+      texts.upsellConsultCard(price(), fullPrice(offer), date, offerUrl()),
       upsellCardKeyboard(price())
     );
   }
@@ -205,7 +214,7 @@ export async function handleUpsell(ctx: Context, session: Session, callbackData:
   if (callbackData === "upsell_back") {
     return replaceWithCard(
       ctx,
-      texts.upsellOffer(price(), fullPrice(offer), date),
+      texts.upsellOffer(price(), fullPrice(offer), date, offerUrl()),
       upsellOfferKeyboard(price())
     );
   }
@@ -231,6 +240,12 @@ async function handleUpsellSignup(ctx: Context, session: Session, offer: UpsellO
     priceRub: offer.priceRub,
     source: "AFTER_PDF",
     orderId: offer.orderId,
+    cardText: texts.upsellConsultCard(
+      price(),
+      fullPrice(offer),
+      formatOfferDate(offer.expiresAt),
+      env.OFFER_URL
+    ),
   });
   if (!request) return;
 

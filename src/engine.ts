@@ -4,6 +4,8 @@ import { env } from "./env";
 import { formatPrice, photos, texts } from "./texts";
 import { buildPrepText, safeGetQuestion } from "./prep";
 import { replyPhotoStatic, replyStatic, sendStatic } from "./send";
+import { allowedToSend } from "./consents";
+import { DATA_CALLBACKS, handleDataCallback } from "./dataCommand";
 import {
   remindAboutConsentOnce,
   remindAboutStuckConsults,
@@ -72,9 +74,12 @@ async function getOrCreateSession(telegramId: bigint, chatId: bigint, firstName?
   });
 }
 
-// Служебные записи (-3 причина отказа, 30/31 CSAT, 99 дополнения после
-// анкеты). Их может быть несколько на пользователя, поэтому просто
-// добавляем строку.
+// Служебные записи (30/31 CSAT, 99 дополнения после анкеты). Их может
+// быть несколько на пользователя, поэтому просто добавляем строку.
+//
+// Номер -3 раньше хранил причину отказа. Вопрос о причине убран
+// 15.10.2026: отказ от согласия — это ответ, а не повод расспрашивать.
+// Старые записи остались в базе нетронутыми.
 async function saveAnswer(telegramId: bigint, questionNumber: number, answerText: string) {
   await prisma.answer.create({ data: { telegramId, questionNumber, answerText } });
 }
@@ -122,6 +127,10 @@ export async function handleIncoming(ctx: Context) {
   // который начал пользоваться ботом до появления согласий, нельзя
   // позволить купить план по старой кнопке в истории чата, минуя
   // согласие.
+  if (callbackData && DATA_CALLBACKS.has(callbackData)) {
+    return handleDataCallback(ctx, callbackData);
+  }
+
   if (!(await allowedWithoutPdConsent(session, callbackData))) {
     return askPdConsentFirst(ctx, session);
   }
@@ -175,8 +184,6 @@ export async function handleIncoming(ctx: Context) {
       return handleWelcomeValue(ctx, session, callbackData);
     case "HOW_IT_WORKS":
       return handleHowItWorks(ctx, session, callbackData);
-    case "DECLINE_REASON":
-      return handleDeclineReason(ctx, session, messageText);
     case "QUESTION":
       return handleQuestion(ctx, session, callbackData, messageText);
     case "SUMMARY_REVIEW":
@@ -625,16 +632,6 @@ async function askPdConsentFirst(ctx: Context, session: Session) {
     },
   });
   return sendPdConsent(ctx);
-}
-
-async function handleDeclineReason(ctx: Context, session: Session, messageText?: string) {
-  if (!messageText) return replyStatic(ctx, texts.declineReasonPrompt);
-  await saveAnswer(session.telegramId, -3, messageText);
-  await prisma.session.update({
-    where: { telegramId: session.telegramId },
-    data: { stage: "WELCOME", status: "declined" },
-  });
-  return replyStatic(ctx, texts.declineFarewell);
 }
 
 async function resetToWelcomeAndSend(ctx: Context, session: Session) {
@@ -1428,14 +1425,18 @@ async function replaceWithCard(ctx: Context, text: string, markup: InlineKeyboar
 async function handleOffer(ctx: Context, session: Session, callbackData?: string) {
   if (callbackData === "offer_pdf_details") {
     await logOfferEvent(session.telegramId, "offer_pdf_details");
-    return replaceWithCard(ctx, texts.offerPdfCard(pdfPrice()), offerPdfCardKeyboard(pdfPrice()));
+    return replaceWithCard(
+      ctx,
+      texts.offerPdfCard(pdfPrice(), escapeHtml(env.OFFER_URL)),
+      offerPdfCardKeyboard(pdfPrice())
+    );
   }
 
   if (callbackData === "offer_consult_details") {
     await logOfferEvent(session.telegramId, "offer_consult_details");
     return replaceWithCard(
       ctx,
-      texts.offerConsultCard(consultPrice()),
+      texts.offerConsultCard(consultPrice(), escapeHtml(env.OFFER_URL)),
       offerConsultCardKeyboard(consultPrice())
     );
   }
@@ -1463,7 +1464,9 @@ async function handleOffer(ctx: Context, session: Session, callbackData?: string
 
   if (callbackData === "offer_consult_signup") {
     await logOfferEvent(session.telegramId, "consult_signup");
-    return startConsultRequest(ctx, session);
+    return startConsultRequest(ctx, session, {
+      cardText: texts.offerConsultCard(consultPrice(), env.OFFER_URL),
+    });
   }
 
   if (callbackData === "offer_decline") return handleDecline(ctx, session);
@@ -1495,6 +1498,10 @@ async function handleDecline(ctx: Context, session: Session) {
   // Если человек уже проходил CSAT, второй раз не спрашиваем.
   if (session.stage === "CSAT_FEEDBACK" || session.stage === "CSAT_DONE") return;
 
+  // Вопрос о впечатлениях — отдельная категория: по умолчанию он не
+  // требует согласия на рассылку, но флагом это можно изменить.
+  if (!(await allowedToSend(session.telegramId, "FEEDBACK", "csat_prompt"))) return;
+
   await prisma.session.update({
     where: { telegramId: session.telegramId },
     data: { stage: "CSAT_RATING" },
@@ -1514,12 +1521,29 @@ async function handleBuy(ctx: Context, session: Session) {
   });
 
   if (existing) {
-    return ctx.reply(
+    return replyStatic(
+      ctx,
       existing.status === "SENT" ? texts.orderAlreadySent : texts.orderAlreadyGenerating
     );
   }
 
   const order = await createPdfOrder(session.telegramId);
+
+  // Нажатие на кнопку с ценой — это и есть принятие оферты: её условия
+  // написаны прямо в карточке, над кнопкой. Записываем сразу после
+  // создания заказа, чтобы запись ссылалась на его номер.
+  await saveConsent(ctx, {
+    telegramId: session.telegramId,
+    type: "OFFER_ACCEPTANCE",
+    action: "GRANTED",
+    source: "PURCHASE_PDF",
+    documents: ["OFFER"],
+    messageText: texts.offerPdfCard(pdfPrice(), env.OFFER_URL),
+    buttonText: `Купить за ${pdfPrice()} ₽`,
+    telegramMessageId: ctx.callbackQuery?.message?.message_id,
+    relatedOrderId: order.id,
+  });
+
   await replyStatic(ctx, texts.orderAccepted);
 
   await ctx.api
@@ -1782,6 +1806,10 @@ async function sendLongMessage(api: Api, chatId: bigint, text: string, asHtml = 
 // Общий хвост обоих путей — и ручного /send, и автоматического /approve:
 // помечаем рекомендацию отправленной и показываем экран оплаты.
 async function markSentAndShowOffer(api: Api, telegramId: bigint, chatId: bigint) {
+  // Оффер идёт следом за разбором, за которым человек и пришёл, — это
+  // не реклама. Но если согласие на данные отозвано, бот молчит совсем.
+  if (!(await allowedToSend(telegramId, "SERVICE", "offer_after_analysis"))) return;
+
   await prisma.recommendation.update({
     where: { telegramId },
     data: { status: "sent", sentAt: new Date() },

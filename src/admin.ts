@@ -14,7 +14,8 @@ import {
   runPdfGeneration,
 } from "./engine";
 import { formatUsd } from "./claudeApi";
-import { consultUrl, orderUrl } from "./web/server";
+import { consultUrl, consentUrl, orderUrl } from "./web/server";
+import { formatMoscow, getConsentState } from "./consents";
 
 function isAdmin(ctx: Context): boolean {
   return String(ctx.from?.id ?? "") === env.ADMIN_TELEGRAM_ID;
@@ -543,6 +544,33 @@ export function registerAdminCommands(bot: Bot) {
         `  записались: ${upsellSignup.size} (${pct(upsellSignup.size, upsellShown.size)})\n` +
         `  «Пока не нужно»: ${upsellDeclined.size} (${pct(upsellDeclined.size, upsellShown.size)})\n` +
         `  нажали запись после срока: ${upsellExpired.size}`
+    );
+  });
+
+  // Что человек разрешил и когда. Нужна, когда вопрос приходит в
+  // переписке и лезть в админку долго.
+  bot.command("consents", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const telegramId = parseTelegramId(ctx.match?.toString());
+    if (telegramId === null) return ctx.reply("Использование: /consents <telegram_id>");
+
+    const state = await getConsentState(telegramId);
+    const line = (label: string, status: { action: string | null; at: Date | null }) => {
+      if (!status.action) return `${label}: записей нет`;
+      const word =
+        status.action === "GRANTED" ? "дано" : status.action === "REVOKED" ? "отозвано" : "отказ";
+      return `${label}: ${word}${status.at ? ` с ${formatMoscow(status.at)}` : ""}`;
+    };
+
+    const link = consentUrl(telegramId);
+    await ctx.reply(
+      `Согласия #${telegramId}:\n\n` +
+        `${line("🔒 Обработка данных", state.PD_PROCESSING)}\n` +
+        `${line("📬 Рассылка", state.MARKETING)}\n` +
+        `${line("📄 Оферта", state.OFFER_ACCEPTANCE)}\n` +
+        `${line("🤝 Передача специалисту", state.SPECIALIST_TRANSFER)}\n` +
+        `${line("👶 Подтверждение о здоровье", state.HEALTH_SELF_DECLARATION)}` +
+        (link ? `\n\nВся история: ${link}` : "")
     );
   });
 

@@ -46,7 +46,8 @@ export function renderOrdersPage(orders: OrderRow[]): string {
     html`<h1>Заказы PDF</h1>
       <p class="muted">
         Жёлтым — ждут больше 12 часов, красным — больше 20 ·
-        <a href="/admin/consults">к заявкам на консультацию</a>
+        <a href="/admin/consults">заявки на консультацию</a> ·
+        <a href="/admin/consents">согласия</a>
       </p>
       <div class="card">${raw(body)}</div>`
   );

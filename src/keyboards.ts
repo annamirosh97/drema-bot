@@ -43,6 +43,49 @@ export function welcomeValueKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("Начать", "start").row().text("Как я работаю", "how_it_works");
 }
 
+// ── Управление согласиями (/data) ───────────────────────────────────
+//
+// Подписи кнопок уходят в журнал как есть, поэтому живут константами.
+
+export const DATA_UNSUBSCRIBE = "Отписаться от рассылки";
+export const DATA_SUBSCRIBE = "Подписаться на рассылку";
+export const DATA_REVOKE_PD = "Отозвать согласие на обработку данных";
+export const DATA_REVOKE_YES = "Да, отозвать";
+export const DATA_REVOKE_NO = "Отмена";
+
+// Показываем только применимые кнопки: подписанному незачем видеть
+// «подписаться», а тому, кто уже отозвал согласие, — «отозвать».
+export function dataKeyboard(options: {
+  canSubscribe: boolean;
+  canUnsubscribe: boolean;
+  canRevokePd: boolean;
+}): InlineKeyboard | undefined {
+  const kb = new InlineKeyboard();
+  let empty = true;
+
+  if (options.canUnsubscribe) {
+    kb.text(DATA_UNSUBSCRIBE, "data_unsubscribe").row();
+    empty = false;
+  }
+  if (options.canSubscribe) {
+    kb.text(DATA_SUBSCRIBE, "data_subscribe").row();
+    empty = false;
+  }
+  if (options.canRevokePd) {
+    kb.text(DATA_REVOKE_PD, "data_revoke_pd").row();
+    empty = false;
+  }
+
+  return empty ? undefined : kb;
+}
+
+export function pdRevokeConfirmKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(DATA_REVOKE_YES, "data_revoke_yes")
+    .row()
+    .text(DATA_REVOKE_NO, "data_revoke_no");
+}
+
 export const HEALTH_OK = "Ничего из этого нет, продолжить";
 export const HEALTH_STOP = "Есть что-то из списка";
 
