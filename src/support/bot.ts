@@ -8,7 +8,7 @@
 // Токена нет — поддержка просто не поднимается. Упала — упала одна: её
 // ошибки не выходят за пределы этого файла.
 
-import { Bot, Context } from "grammy";
+import { Bot, Context, InlineKeyboard } from "grammy";
 import { prisma } from "../prisma";
 import { env } from "../env";
 import { supportTexts } from "./texts";
@@ -390,9 +390,9 @@ export function startSupportBot(): void {
     // Параметр ссылки (/start src_pdf) запоминаем как источник.
     const source = ctx.match?.toString().trim() || undefined;
     await getOrCreateThread(BigInt(ctx.from!.id), source);
-    await ctx.reply(supportTexts.welcome(), {
-      parse_mode: "HTML",
+    await ctx.reply(supportTexts.welcome, {
       link_preview_options: { is_disabled: true },
+      reply_markup: new InlineKeyboard().text("Задать вопрос", "support_ask"),
     });
   });
 
@@ -410,6 +410,13 @@ export function startSupportBot(): void {
   });
   bot.command("done", (ctx) => handleDone(bot, ctx));
   bot.command("card", (ctx) => handleCard(bot, ctx));
+
+  // Кнопку убираем: она нужна один раз, чтобы подтолкнуть начать.
+  bot.callbackQuery("support_ask", async (ctx) => {
+    await ctx.answerCallbackQuery().catch(() => {});
+    await ctx.editMessageReplyMarkup().catch(() => {});
+    await ctx.reply(supportTexts.askQuestion);
+  });
 
   bot.callbackQuery("support_bind_yes", async (ctx) => {
     if (!isSupportAdmin(ctx.from?.id) || !ctx.chat) return;
