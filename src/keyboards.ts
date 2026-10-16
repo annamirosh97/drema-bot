@@ -86,8 +86,8 @@ export function pdRevokeConfirmKeyboard(): InlineKeyboard {
     .text(DATA_REVOKE_NO, "data_revoke_no");
 }
 
-export const HEALTH_OK = "Ничего из этого нет, продолжить";
-export const HEALTH_STOP = "Есть что-то из списка";
+export const HEALTH_OK = "Ничего из этого";
+export const HEALTH_STOP = "Да, есть";
 
 export function healthScreenKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
