@@ -288,9 +288,16 @@ async function react(bot: Bot, chatId: number, messageId: number) {
 // ── Привязка группы ─────────────────────────────────────────────────
 
 async function handleBind(bot: Bot, ctx: Context) {
-  if (!isSupportAdmin(ctx.from?.id)) return ctx.reply(supportTexts.bindNotAdmin);
+  if (!isSupportAdmin(ctx.from?.id)) {
+    console.log(
+      `/bind от ${ctx.from?.id}: нет в SUPPORT_ADMIN_IDS (${env.SUPPORT_ADMIN_IDS.join(", ")}).`
+    );
+    return ctx.reply(supportTexts.bindNotAdmin);
+  }
+
   const chat = ctx.chat;
-  if (!chat || chat.type === "private") return;
+  if (!chat) return;
+  if (chat.type === "private") return ctx.reply(supportTexts.bindNotInGroup);
 
   const full = await bot.api.getChat(chat.id);
   if (!("is_forum" in full) || !full.is_forum) {
@@ -362,6 +369,22 @@ export function startSupportBot(): void {
 
   const bot = new Bot(env.SUPPORT_BOT_TOKEN);
 
+  // Диагностика по группе: по этим строкам видно, доходят ли до бота
+  // обновления оттуда, от кого они и считается ли человек своим. В
+  // личку не лезем — иначе лог утонет в сообщениях родителей.
+  bot.use(async (ctx, next) => {
+    const chat = ctx.chat;
+    if (chat && chat.type !== "private") {
+      const text = ctx.message?.text ?? ctx.editedMessage?.text ?? "";
+      console.log(
+        `[поддержка] чат ${chat.id} (${chat.type}), тема ${ctx.message?.message_thread_id ?? "общая"}, ` +
+          `от ${ctx.from?.id}${isSupportAdmin(ctx.from?.id) ? " — свой" : " — не в SUPPORT_ADMIN_IDS"}` +
+          (text ? `, текст: ${text.slice(0, 40)}` : "")
+      );
+    }
+    return next();
+  });
+
   bot.command("start", async (ctx) => {
     if (ctx.chat?.type !== "private") return;
     // Параметр ссылки (/start src_pdf) запоминаем как источник.
@@ -373,7 +396,18 @@ export function startSupportBot(): void {
     });
   });
 
-  bot.command("bind", (ctx) => handleBind(bot, ctx));
+  bot.command("bind", async (ctx) => {
+    try {
+      await handleBind(bot, ctx);
+    } catch (error) {
+      // Раньше любая ошибка внутри /bind уходила в bot.catch, и со
+      // стороны группы бот просто молчал — понять, что случилось, было
+      // нельзя. Теперь причина видна там же, где её ждут.
+      const reason = (error as { description?: string })?.description ?? String(error);
+      console.error("Привязка группы не удалась:", error);
+      await ctx.reply(supportTexts.bindFailed(reason)).catch(() => {});
+    }
+  });
   bot.command("done", (ctx) => handleDone(bot, ctx));
   bot.command("card", (ctx) => handleCard(bot, ctx));
 
@@ -408,7 +442,11 @@ export function startSupportBot(): void {
   // его падение не должно ронять процесс целиком.
   void bot
     .start({
-      onStart: (info) => console.log(`Бот поддержки @${info.username} запущен.`),
+      onStart: (info) =>
+        console.log(
+          `Бот поддержки @${info.username} запущен. ` +
+            `Отвечать и привязывать группу могут: ${env.SUPPORT_ADMIN_IDS.join(", ")}.`
+        ),
     })
     .catch((error) => console.error("Бот поддержки не запустился:", error));
 }
