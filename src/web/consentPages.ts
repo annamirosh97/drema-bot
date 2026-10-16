@@ -113,9 +113,53 @@ export interface ConsentCardData {
   // Обращение в поддержку, если человек писал. Ссылка нужна рядом с
   // согласиями: это одно и то же место, куда идут за историей.
   supportThreadId?: number | null;
+  // Что человек ответил про бесплатный разбор. Отдельной страницы
+  // разбора в админке нет, а смотреть на это удобнее всего здесь:
+  // рядом с тем, что он разрешил и что получил.
+  analysisFeedback?: {
+    rating: string | null;
+    comment: string | null;
+    skippedComment: boolean;
+    askedAt: Date | null;
+    answeredAt: Date | null;
+    skipReason: string | null;
+  } | null;
   // true — страница для печати: без навигации и кнопок, с шапкой.
   forPrint?: boolean;
   printedAt?: Date;
+}
+
+const ANALYSIS_LABELS: Record<string, string> = {
+  YES: "Да, очень похоже",
+  PARTLY: "Отчасти",
+  NO: "Не совсем",
+};
+
+function analysisFeedbackCard(data: ConsentCardData): string {
+  const f = data.analysisFeedback;
+  if (!f) return "";
+
+  let body: string;
+  if (f.skipReason) {
+    body = html`<p class="muted">Не спрашивали: ${f.skipReason}.</p>`;
+  } else if (!f.askedAt) {
+    body = html`<p class="muted">Вопрос запланирован, ещё не отправлен.</p>`;
+  } else if (!f.rating) {
+    body = html`<p class="muted">Спросили ${formatMoscow(f.askedAt)}, ответа нет.</p>`;
+  } else {
+    const comment = f.comment
+      ? html`<pre>${f.comment}</pre>`
+      : html`<p class="muted">${f.skippedComment ? "комментарий пропущен" : "комментария нет"}</p>`;
+    body =
+      html`<p><b>${ANALYSIS_LABELS[f.rating] ?? f.rating}</b>
+        <span class="muted">· ${f.answeredAt ? formatMoscow(f.answeredAt) : ""}</span></p>` +
+      comment;
+  }
+
+  return html`<div class="card">
+    <h2>Узнали в разборе своего малыша?</h2>
+    ${raw(body)}
+  </div>`;
 }
 
 function documentsCell(record: ConsentRecordRow): string {
@@ -199,6 +243,8 @@ export function renderConsentCard(data: ConsentCardData): string {
         </p>`;
 
   const body = html`${raw(header)}
+
+    ${raw(analysisFeedbackCard(data))}
 
     <div class="card">
       <h2>Сейчас</h2>

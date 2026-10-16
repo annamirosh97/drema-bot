@@ -3,6 +3,7 @@
 
 import { PdfContent, ScheduleVariant } from "../paidPdf";
 import { SCHEDULE_DISCLAIMER } from "../pdfTexts";
+import { PDF_LABELS } from "./feedbackPages";
 import { escape, html, page, raw } from "./html";
 
 export interface OrderRow {
@@ -11,6 +12,9 @@ export interface OrderRow {
   status: string;
   createdAt: Date;
   hoursWaiting: number;
+  // Что родитель ответил через неделю. null — ещё не спрашивали или
+  // не ответил.
+  result: string | null;
 }
 
 // Подсветка по времени ожидания: ТЗ просит отметить заказы старше 12
@@ -30,13 +34,14 @@ export function renderOrdersPage(orders: OrderRow[]): string {
       <td>${o.createdAt.toLocaleString("ru-RU")}</td>
       <td>${o.status}</td>
       <td>${raw(waitingPill(o.hoursWaiting, o.status))}</td>
+      <td>${o.result ? PDF_LABELS[o.result] ?? o.result : "—"}</td>
       <td class="muted">#${o.telegramId}</td>
     </tr>`
   );
 
   const body = orders.length
     ? html`<table>
-        <tr><th>Заказ</th><th>Создан</th><th>Статус</th><th>Ждёт</th><th>Пользователь</th></tr>
+        <tr><th>Заказ</th><th>Создан</th><th>Статус</th><th>Ждёт</th><th>Результат</th><th>Пользователь</th></tr>
         ${raw(rows.join(""))}
       </table>`
     : html`<p class="muted">Заказов пока нет.</p>`;
@@ -76,6 +81,17 @@ export interface OrderPageData {
   regenerating: boolean;
   sentJustNow: boolean;
   sendError: string;
+  // Что родитель ответил через неделю после плана. Стоит рядом с
+  // черновиком: читать результат имеет смысл вместе с тем, что
+  // отправляли.
+  feedback: {
+    result: string | null;
+    comment: string | null;
+    skippedComment: boolean;
+    askedAt: Date | null;
+    answeredAt: Date | null;
+    skipReason: string | null;
+  } | null;
 }
 
 function collapsible(title: string, text: string): string {
@@ -131,7 +147,30 @@ export function renderOrderPage(data: OrderPageData): string {
           Статус заказа не изменился, можно попробовать ещё раз.</div>`
       : "";
 
+  const feedbackBlock = (() => {
+    const f = data.feedback;
+    if (!f) return html`<p class="muted">Вопрос о результате ещё не запланирован.</p>`;
+    if (f.skipReason) return html`<p class="muted">Не спрашивали: ${f.skipReason}.</p>`;
+    if (!f.askedAt) return html`<p class="muted">Вопрос запланирован, ещё не отправлен.</p>`;
+    if (!f.result) return html`<p class="muted">Спросили ${f.askedAt.toLocaleString("ru-RU")}, ответа нет.</p>`;
+
+    return (
+      html`<p><b>${PDF_LABELS[f.result] ?? f.result}</b>
+        <span class="muted">· ${f.answeredAt?.toLocaleString("ru-RU") ?? ""}</span></p>` +
+      raw(
+        f.comment
+          ? html`<pre>${f.comment}</pre>`
+          : html`<p class="muted">${f.skippedComment ? "комментарий пропущен" : "комментария нет"}</p>`
+      )
+    );
+  })();
+
   const left = html`<div class="card">
+      <h2>Результат через неделю</h2>
+      ${raw(feedbackBlock)}
+    </div>
+
+    <div class="card">
       <h2>Исходные данные</h2>
       ${raw(collapsible("Ответы анкеты", data.questionnaire))}
       ${raw(collapsible("ВЫВОДЫ анализа", data.analysis))}

@@ -33,6 +33,14 @@ import {
 } from "./consentPages";
 import { getConsentState } from "../consents";
 import {
+  AnalysisFeedbackPageData,
+  AnalysisFeedbackRow,
+  PdfFeedbackPageData,
+  PdfFeedbackRow,
+  renderAnalysisFeedbackPage,
+  renderPdfFeedbackPage,
+} from "./feedbackPages";
+import {
   SupportListData,
   SupportRow,
   SupportThreadData,
@@ -190,7 +198,7 @@ async function loadConsentCard(rawId: string): Promise<ConsentCardData | null> {
     return null;
   }
 
-  const [session, request, records, documents, support] = await Promise.all([
+  const [session, request, records, documents, support, analysisFeedback] = await Promise.all([
     prisma.session.findUnique({ where: { telegramId } }),
     prisma.consultRequest.findFirst({
       where: { telegramId, parentUsername: { not: null } },
@@ -199,6 +207,7 @@ async function loadConsentCard(rawId: string): Promise<ConsentCardData | null> {
     prisma.consentRecord.findMany({ where: { telegramId }, orderBy: { createdAt: "asc" } }),
     prisma.legalDocument.findMany(),
     prisma.supportThread.findUnique({ where: { telegramId } }),
+    prisma.analysisFeedback.findUnique({ where: { telegramId } }),
   ]);
 
   // Карточку показываем и тому, у кого сессии уже нет: журнал её
@@ -213,6 +222,16 @@ async function loadConsentCard(rawId: string): Promise<ConsentCardData | null> {
     username: request?.parentUsername ?? null,
     firstName: session?.firstName ?? null,
     supportThreadId: support?.id ?? null,
+    analysisFeedback: analysisFeedback
+      ? {
+          rating: analysisFeedback.rating,
+          comment: analysisFeedback.comment,
+          skippedComment: analysisFeedback.skippedComment,
+          askedAt: analysisFeedback.askedAt,
+          answeredAt: analysisFeedback.answeredAt,
+          skipReason: analysisFeedback.skipReason,
+        }
+      : null,
     current: Object.entries(state).map(([type, status]) => ({
       type,
       action: status.action,
@@ -274,6 +293,83 @@ async function marketingAudience(): Promise<MarketingRow[]> {
   }
 
   return rows;
+}
+
+// ── Данные для страниц обратной связи ───────────────────────────────
+
+async function loadAnalysisFeedback(days: number): Promise<AnalysisFeedbackPageData> {
+  const since = new Date(Date.now() - days * 24 * 3_600_000);
+
+  const [asked, answered, rows] = await Promise.all([
+    prisma.analysisFeedback.count({ where: { askedAt: { gte: since } } }),
+    prisma.analysisFeedback.count({ where: { answeredAt: { gte: since } } }),
+    // Показываем только тревожные ответы: «Да, очень похоже» читать
+    // построчно незачем, его видно в сводке.
+    prisma.analysisFeedback.findMany({
+      where: { answeredAt: { gte: since }, rating: { in: ["PARTLY", "NO"] } },
+      orderBy: { answeredAt: "desc" },
+      take: 200,
+    }),
+  ]);
+
+  const list: AnalysisFeedbackRow[] = [];
+  for (const row of rows) {
+    const session = await prisma.session.findUnique({ where: { telegramId: row.telegramId } });
+    const links: { label: string; url: string }[] = [];
+    const user = consentUrl(row.telegramId);
+    if (user) links.push({ label: "пользователь", url: user });
+
+    list.push({
+      telegramId: String(row.telegramId),
+      name: session?.firstName ?? null,
+      rating: row.rating!,
+      comment: row.comment,
+      skippedComment: row.skippedComment,
+      answeredAt: row.answeredAt!,
+      links,
+    });
+  }
+
+  return { rows: list, days, asked, answered };
+}
+
+async function loadPdfFeedback(days: number, filter: string): Promise<PdfFeedbackPageData> {
+  const since = new Date(Date.now() - days * 24 * 3_600_000);
+
+  const [asked, answered, rows] = await Promise.all([
+    prisma.pdfFeedback.count({ where: { askedAt: { gte: since } } }),
+    prisma.pdfFeedback.count({ where: { answeredAt: { gte: since } } }),
+    prisma.pdfFeedback.findMany({
+      where: {
+        answeredAt: { gte: since },
+        ...(filter ? { result: filter as never } : { result: { not: null } }),
+      },
+      orderBy: { answeredAt: "desc" },
+      take: 200,
+    }),
+  ]);
+
+  const list: PdfFeedbackRow[] = [];
+  for (const row of rows) {
+    const [session, draft] = await Promise.all([
+      prisma.session.findUnique({ where: { telegramId: row.telegramId } }),
+      prisma.pdfDraft.findUnique({ where: { orderId: row.orderId } }),
+    ]);
+
+    list.push({
+      orderId: row.orderId,
+      telegramId: String(row.telegramId),
+      name: session?.firstName ?? null,
+      result: row.result!,
+      comment: row.comment,
+      skippedComment: row.skippedComment,
+      answeredAt: row.answeredAt!,
+      hasEdits: draft?.editedContent != null,
+      orderUrl: orderUrl(row.orderId),
+    });
+  }
+
+  return { rows: list, days, filter, asked, answered };
 }
 
 // ── Данные для страниц поддержки ────────────────────────────────────
@@ -482,12 +578,19 @@ export function startAdminServer(api: Api) {
 
   app.get("/admin/orders", async (_req, res) => {
     const orders = await prisma.order.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
+    const feedback = await prisma.pdfFeedback.findMany({
+      where: { orderId: { in: orders.map((o) => o.id) } },
+      select: { orderId: true, result: true },
+    });
+    const byOrder = new Map(feedback.map((f) => [f.orderId, f.result]));
+
     const rows: OrderRow[] = orders.map((o) => ({
       id: o.id,
       telegramId: String(o.telegramId),
       status: o.status,
       createdAt: o.createdAt,
       hoursWaiting: (Date.now() - o.createdAt.getTime()) / 3_600_000,
+      result: byOrder.get(o.id) ?? null,
     }));
     res.send(renderOrdersPage(rows));
   });
@@ -498,6 +601,7 @@ export function startAdminServer(api: Api) {
 
     const { order, draft, recommendation } = loaded;
     const content = currentContent(draft);
+    const feedback = await prisma.pdfFeedback.findUnique({ where: { orderId: order.id } });
     const group = content.relaxationGroup as RelaxationGroup;
 
     res.send(
@@ -521,6 +625,16 @@ export function startAdminServer(api: Api) {
         regenerating: req.query.regen === "1",
         sentJustNow: req.query.sent === "1",
         sendError: typeof req.query.error === "string" ? req.query.error : "",
+        feedback: feedback
+          ? {
+              result: feedback.result,
+              comment: feedback.comment,
+              skippedComment: feedback.skippedComment,
+              askedAt: feedback.askedAt,
+              answeredAt: feedback.answeredAt,
+              skipReason: feedback.skipReason,
+            }
+          : null,
       })
     );
   });
@@ -708,6 +822,19 @@ export function startAdminServer(api: Api) {
       .type("text/csv; charset=utf-8")
       .setHeader("Content-Disposition", "attachment; filename=marketing.csv");
     res.send(marketingCsv(await marketingAudience()));
+  });
+
+  // ── Обратная связь ────────────────────────────────────────────────
+
+  app.get("/admin/feedback/analysis", async (req, res) => {
+    const days = Math.max(1, Number(req.query.days) || 30);
+    res.send(renderAnalysisFeedbackPage(await loadAnalysisFeedback(days)));
+  });
+
+  app.get("/admin/feedback/pdf", async (req, res) => {
+    const days = Math.max(1, Number(req.query.days) || 30);
+    const filter = String(req.query.result ?? "");
+    res.send(renderPdfFeedbackPage(await loadPdfFeedback(days, filter)));
   });
 
   // ── Поддержка ─────────────────────────────────────────────────────

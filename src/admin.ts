@@ -135,6 +135,67 @@ export function buildOnboardingFunnel(events: FunnelEvent[], days: number): stri
   );
 }
 
+// ── Обратная связь в /stats ─────────────────────────────────────────
+
+const ANALYSIS_LABELS: Record<string, string> = {
+  YES: "Да, очень похоже",
+  PARTLY: "Отчасти",
+  NO: "Не совсем",
+};
+
+const PDF_LABELS: Record<string, string> = {
+  BETTER: "Стало лучше",
+  SAME: "Без изменений",
+  WORSE: "Стало хуже",
+  NOT_STARTED: "Пока не начали",
+};
+
+// Возрастные группы те же, что у памяток: 4–6, 6–9, 9–12 месяцев.
+function ageGroup(months: number | null): string | null {
+  if (months === null || !Number.isFinite(months)) return null;
+  if (months < 6) return "4–6";
+  if (months < 9) return "6–9";
+  return "9–12";
+}
+
+interface Answered<T extends string> {
+  telegramId: bigint;
+  value: T;
+}
+
+// Распределение ответов одной строкой: «лучше 3 · хуже 1».
+function distribution<T extends string>(
+  rows: Answered<T>[],
+  labels: Record<string, string>
+): string {
+  if (!rows.length) return "ответов нет";
+  const counts = new Map<string, number>();
+  for (const row of rows) counts.set(row.value, (counts.get(row.value) ?? 0) + 1);
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([value, n]) => `${labels[value] ?? value} ${n}`)
+    .join(" · ");
+}
+
+// Разрез по признаку. Группы без ответов пропускаем: строка «9–12:
+// ответов нет» ничего не добавляет.
+function breakdown<T extends string>(
+  rows: Answered<T>[],
+  labels: Record<string, string>,
+  by: (row: Answered<T>) => string | null
+): string[] {
+  const groups = new Map<string, Answered<T>[]>();
+  for (const row of rows) {
+    const key = by(row);
+    if (key === null) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(row);
+  }
+  return [...groups.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([key, group]) => `    ${key}: ${distribution(group, labels)}`);
+}
+
 interface SendFlowState {
   telegramId: bigint;
   chatId: bigint;
@@ -445,8 +506,21 @@ export function registerAdminCommands(bot: Bot) {
     const days = Math.max(1, Number(ctx.match?.toString().trim()) || FUNNEL_DAYS);
     const since = new Date(Date.now() - days * 24 * 3_600_000);
 
-    const [total, completed, pdRecords, events, orders, consults, healthExitRows, funnelEvents] =
-      await Promise.all([
+    const [
+      total,
+      completed,
+      pdRecords,
+      events,
+      orders,
+      consults,
+      healthExitRows,
+      funnelEvents,
+      analysisRows,
+      pdfRows,
+      ageAnswers,
+      drafts,
+      consultRows,
+    ] = await Promise.all([
       prisma.session.count(),
       prisma.session.count({ where: { status: "completed" } }),
       // Отказы теперь считаем по журналу согласий: кнопка «Пока не
@@ -472,6 +546,16 @@ export function registerAdminCommands(bot: Bot) {
         where: { createdAt: { gte: since } },
         select: { telegramId: true, type: true },
       }),
+      // Обратная связь за тот же период, что и воронка: один /stats —
+      // один период, иначе цифры в нём начали бы жить по разным часам.
+      prisma.analysisFeedback.findMany({ where: { createdAt: { gte: since } } }),
+      prisma.pdfFeedback.findMany({ where: { createdAt: { gte: since } } }),
+      prisma.answer.findMany({
+        where: { questionNumber: 1 },
+        select: { telegramId: true, answerText: true },
+      }),
+      prisma.pdfDraft.findMany({ select: { orderId: true, editedContent: true } }),
+      prisma.consultRequest.findMany({ select: { telegramId: true } }),
     ]);
 
     const healthExits = healthExitRows.reduce((sum, row) => sum + row.count, 0);
@@ -517,6 +601,84 @@ export function registerAdminCommands(bot: Bot) {
     const withoutExample = [...shown].filter((id) => !sawExample.has(id));
     const boughtWithoutExample = [...bought].filter((id) => !sawExample.has(id)).length;
 
+    const ageByUser = new Map(ageAnswers.map((a) => [String(a.telegramId), Number(a.answerText)]));
+    const editedByOrder = new Map(drafts.map((d) => [d.orderId, d.editedContent !== null]));
+    const withConsult = new Set(consultRows.map((c) => String(c.telegramId)));
+
+    // ── Оценка разбора ──────────────────────────────────────────────
+    const aAsked = analysisRows.filter((r) => r.askedAt !== null);
+    const aSkipped = analysisRows.filter((r) => r.skipReason !== null);
+    const aAnswered: Answered<string>[] = analysisRows
+      .filter((r) => r.rating !== null)
+      .map((r) => ({ telegramId: r.telegramId, value: r.rating as string }));
+    const aComments = analysisRows.filter((r) => r.comment !== null).length;
+
+    const skipReasons = new Map<string, number>();
+    for (const row of aSkipped) {
+      skipReasons.set(row.skipReason!, (skipReasons.get(row.skipReason!) ?? 0) + 1);
+    }
+
+    const analysisBlock = [
+      `Оценка разбора за ${days} дн.:`,
+      `  запланировано: ${analysisRows.length}`,
+      `  отправлено: ${aAsked.length}`,
+      `  не отправлено: ${aSkipped.length}` +
+        (skipReasons.size
+          ? ` (${[...skipReasons].map(([r, n]) => `${r} ${n}`).join(", ")})`
+          : ""),
+      `  ответили: ${aAnswered.length} (${pct(aAnswered.length, aAsked.length)} от отправленных)`,
+      `  ${distribution(aAnswered, ANALYSIS_LABELS)}`,
+      `  комментариев: ${aComments}`,
+      ...(aAnswered.length
+        ? [
+            "  по возрасту:",
+            ...breakdown(aAnswered, ANALYSIS_LABELS, (r) =>
+              ageGroup(ageByUser.get(String(r.telegramId)) ?? null)
+            ),
+          ]
+        : []),
+    ];
+
+    // ── Результат плана ─────────────────────────────────────────────
+    const pAsked = pdfRows.filter((r) => r.askedAt !== null);
+    const pAnsweredRows = pdfRows.filter((r) => r.result !== null);
+    const pAnswered: Answered<string>[] = pAnsweredRows.map((r) => ({
+      telegramId: r.telegramId,
+      value: r.result as string,
+    }));
+    const pComments = pdfRows.filter((r) => r.comment !== null).length;
+    const orderByUser = new Map(pAnsweredRows.map((r) => [String(r.telegramId), r.orderId]));
+
+    const pdfBlock = [
+      `Результат плана за ${days} дн.:`,
+      `  отправлено: ${pAsked.length}`,
+      `  ответили: ${pAnswered.length} (${pct(pAnswered.length, pAsked.length)} от отправленных)`,
+      `  ${distribution(pAnswered, PDF_LABELS)}`,
+      `  комментариев: ${pComments}`,
+      ...(pAnswered.length
+        ? [
+            "  правки админа:",
+            ...breakdown(pAnswered, PDF_LABELS, (r) => {
+              const orderId = orderByUser.get(String(r.telegramId));
+              if (orderId === undefined) return null;
+              return editedByOrder.get(orderId) ? "с правками" : "без правок";
+            }),
+            "  по возрасту:",
+            ...breakdown(pAnswered, PDF_LABELS, (r) =>
+              ageGroup(ageByUser.get(String(r.telegramId)) ?? null)
+            ),
+            "  консультация:",
+            ...breakdown(pAnswered, PDF_LABELS, (r) =>
+              withConsult.has(String(r.telegramId)) ? "записались" : "не записывались"
+            ),
+          ]
+        : []),
+    ];
+
+    const feedbackLink = env.PUBLIC_BASE_URL
+      ? `\n\nПодробно: ${env.PUBLIC_BASE_URL}/admin/feedback/analysis и ${env.PUBLIC_BASE_URL}/admin/feedback/pdf`
+      : "";
+
     const byStatus = (rows: { status: string; _count: number }[], empty: string) =>
       rows.map((row) => `  ${row.status}: ${row._count}`).join("\n") || `  ${empty}`;
 
@@ -543,7 +705,9 @@ export function registerAdminCommands(bot: Bot) {
         `  открыли карточку: ${upsellDetails.size} (${pct(upsellDetails.size, upsellShown.size)})\n` +
         `  записались: ${upsellSignup.size} (${pct(upsellSignup.size, upsellShown.size)})\n` +
         `  «Пока не нужно»: ${upsellDeclined.size} (${pct(upsellDeclined.size, upsellShown.size)})\n` +
-        `  нажали запись после срока: ${upsellExpired.size}`
+        `  нажали запись после срока: ${upsellExpired.size}\n\n` +
+        `${analysisBlock.join("\n")}\n\n` +
+        `${pdfBlock.join("\n")}${feedbackLink}`
     );
   });
 
