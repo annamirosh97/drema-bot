@@ -49,13 +49,13 @@ export async function sendSupport(ctx: Context, showBack: boolean) {
   // кнопки показываем почту. Если и её нет, остаётся только текст: это
   // лучше, чем «Почта для связи:» без адреса.
   if (env.SUPPORT_BOT_USERNAME) {
-    return replyStatic(ctx, texts.menuSupport, {
+    return replyStatic(ctx, texts.menuSupport(env.SUPPORT_BOT_USERNAME), {
       reply_markup: supportLinkKeyboard(env.SUPPORT_BOT_USERNAME, showBack),
     });
   }
 
   const email = env.CONTACT_EMAIL ? `\n\n${texts.contactEmailLine(env.CONTACT_EMAIL)}` : "";
-  return replyStatic(ctx, `${texts.menuSupport}${email}`, backButton(showBack));
+  return replyStatic(ctx, `${texts.menuSupport("")}${email}`, backButton(showBack));
 }
 
 // ── Документы ───────────────────────────────────────────────────────

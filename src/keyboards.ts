@@ -49,13 +49,13 @@ export function welcomeValueKeyboard(): InlineKeyboard {
 // обрезал бы их на узком экране.
 export function menuKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text("🔄 Начать заново", "menu_restart")
+    .text("Начать бот заново", "menu_restart")
     .row()
-    .text("💬 Поддержка", "menu_support")
+    .text("Поддержка", "menu_support")
     .row()
-    .text("📄 Документы", "menu_docs")
+    .text("Документы", "menu_docs")
     .row()
-    .text("🌙 Команда Дрёмы", "menu_team");
+    .text("Команда Дрёмы", "menu_team");
 }
 
 export const RESTART_YES = "Да, начать заново";
@@ -68,10 +68,14 @@ export function restartConfirmKeyboard(): InlineKeyboard {
     .text(RESTART_NO, "restart_no");
 }
 
+// Подпись одна на две клавиатуры: эта кнопка встаёт и отдельно, и
+// рядом со ссылкой в поддержку. Константой — чтобы не разъехались.
+export const BACK_TO_QUIZ = "Вернуться к анкете";
+
 // Возврат к прерванному шагу. Появляется только у тех, от кого бот
 // чего-то ждёт: человеку, который всё прошёл, возвращаться некуда.
 export function backToQuizKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("↩️ Вернуться к анкете", "menu_back");
+  return new InlineKeyboard().text(BACK_TO_QUIZ, "menu_back");
 }
 
 // Кнопка-ссылка в бот поддержки. Параметр src_menu доезжает до карточки
@@ -82,10 +86,10 @@ export function backToQuizKeyboard(): InlineKeyboard {
 // лишнее сообщение ради одной кнопки — шум.
 export function supportLinkKeyboard(botUsername: string, withBack = false): InlineKeyboard {
   const keyboard = new InlineKeyboard().url(
-    "💬 Написать в поддержку",
+    "Написать в поддержку",
     `https://t.me/${botUsername}?start=src_menu`
   );
-  return withBack ? keyboard.row().text("↩️ Вернуться к анкете", "menu_back") : keyboard;
+  return withBack ? keyboard.row().text(BACK_TO_QUIZ, "menu_back") : keyboard;
 }
 
 // ── Управление согласиями (/data) ───────────────────────────────────
