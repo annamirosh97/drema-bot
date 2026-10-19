@@ -38,8 +38,8 @@ function backButton(showBack: boolean) {
   return showBack ? { reply_markup: backToQuizKeyboard() } : {};
 }
 
-export async function sendMenu(ctx: Context) {
-  return replyStatic(ctx, texts.menu, { reply_markup: menuKeyboard() });
+export async function sendMenu(ctx: Context, showBack = false) {
+  return replyStatic(ctx, texts.menu, { reply_markup: menuKeyboard(showBack) });
 }
 
 // ── Поддержка ───────────────────────────────────────────────────────

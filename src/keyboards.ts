@@ -47,8 +47,12 @@ export function welcomeValueKeyboard(): InlineKeyboard {
 
 // Кнопки по одной в строке: подписи длинные, и в два столбца Telegram
 // обрезал бы их на узком экране.
-export function menuKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
+//
+// Пятая кнопка — возврат к анкете — появляется только посреди анкеты.
+// Решает это движок: он один знает, есть ли вопрос, к которому можно
+// вернуться.
+export function menuKeyboard(withBack = false): InlineKeyboard {
+  const keyboard = new InlineKeyboard()
     .text("Начать бот заново", "menu_restart")
     .row()
     .text("Поддержка", "menu_support")
@@ -56,6 +60,8 @@ export function menuKeyboard(): InlineKeyboard {
     .text("Документы", "menu_docs")
     .row()
     .text("Команда Дрёмы", "menu_team");
+
+  return withBack ? keyboard.row().text(BACK_TO_QUIZ, "menu_back") : keyboard;
 }
 
 export const RESTART_YES = "Да, начать заново";

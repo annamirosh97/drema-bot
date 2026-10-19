@@ -275,43 +275,29 @@ export async function handleIncoming(ctx: Context) {
 //
 // Меню можно открыть в любой момент, в том числе посреди анкеты. Чтобы
 // человек не остался без последнего вопроса под стопкой новых
-// сообщений, пункты меню заканчиваются кнопкой «Вернуться к анкете»,
-// которая просто присылает текущий экран заново.
+// сообщений, кнопка «Вернуться к анкете» стоит и пятой в самом меню, и
+// под каждым его пунктом. Она присылает текущий вопрос заново и ничего
+// не меняет в состоянии.
 //
 // Стадии перечислены явно, а не через вызов обработчиков: обработчик,
 // позванный без ввода, местами отвечает «напишите ответ текстом», и
 // для возврата это не годится.
 
-// Ждёт ли бот от человека ответа или нажатия. Если нет — возвращаться
-// некуда, и кнопку показывать не нужно.
-export function isWaitingForUser(session: Session): boolean {
-  switch (session.stage) {
-    // Приветственные экраны намеренно не считаются: на них анкета ещё
-    // не началась, и кнопка «Вернуться к анкете» обещала бы то, чего
-    // нет. Эти экраны к тому же всего на одно сообщение выше в чате.
-    case "WELCOME":
-    case "WELCOME_VALUE":
-    case "HOW_IT_WORKS":
-      return false;
-    case "TERMS":
-    case "TERMS_HEALTH":
-    case "HEALTH_SCREEN":
-    case "PD_CONSENT":
-    case "MARKETING_CONSENT":
-    case "QUESTION":
-    case "SUMMARY_REVIEW":
-    case "EDIT_PICK_QUESTION":
-    case "EDIT_ANSWER":
-    case "EDIT_MORE":
-    case "FAKE_DOOR_OFFER":
-    case "CSAT_RATING":
-    case "CSAT_FEEDBACK":
-      return true;
-    // Анкета сдана и разбор готовится, всё пройдено, анкета остановлена
-    // — здесь бот ничего не ждёт.
-    default:
-      return false;
-  }
+// Идёт ли анкета прямо сейчас — то есть есть ли вопрос, который можно
+// прислать заново.
+//
+// Условие намеренно узкое. Кнопка обещает вернуть к анкете, и показывать
+// её там, где анкеты нет, значит путать: до её начала возвращаться
+// некуда, а после — незачем, человек уже всё ответил. Поэтому ни
+// приветственные экраны, ни согласия, ни оффер, ни CSAT сюда не входят.
+//
+// Сверку ответов и правку тоже не считаем: там нет «текущего вопроса»,
+// там итоговая анкета, и кнопка прислала бы не то, что обещает.
+export function inQuestionnaire(session: Session): boolean {
+  if (session.stage !== "QUESTION" && session.stage !== "EDIT_ANSWER") return false;
+  const qNum = session.currentQuestionNumber;
+  // Вопрос мог быть убран из анкеты: присылать нечего.
+  return qNum != null && safeGetQuestion(qNum) !== null;
 }
 
 // Присылает текущий экран заново. Состояние сессии не меняет.
@@ -365,7 +351,7 @@ export async function resendCurrentStep(ctx: Context, session: Session) {
 // Пункт меню присылает новое сообщение, а само меню не трогает: п.2 ТЗ
 // просит, чтобы оно осталось рабочим и после нажатия.
 async function handleMenuCallback(ctx: Context, session: Session, callbackData: string) {
-  const back = isWaitingForUser(session);
+  const back = inQuestionnaire(session);
 
   switch (callbackData) {
     case "menu_restart":
@@ -408,12 +394,12 @@ export async function handleMenuCommand(ctx: Context, which: MenuCommand) {
     BigInt(ctx.chat.id),
     from.first_name
   );
-  const back = isWaitingForUser(session);
+  const back = inQuestionnaire(session);
 
   switch (which) {
     case "menu":
       await logOfferEvent(session.telegramId, "menu_opened");
-      return sendMenu(ctx);
+      return sendMenu(ctx, back);
     case "support":
       await logOfferEvent(session.telegramId, "menu_support");
       return sendSupport(ctx, back);
@@ -464,7 +450,7 @@ async function cancelRestart(ctx: Context, session: Session) {
   return replaceConfirmMessage(
     ctx,
     texts.restartCancelled,
-    isWaitingForUser(session) ? backToQuizKeyboard() : undefined
+    inQuestionnaire(session) ? backToQuizKeyboard() : undefined
   );
 }
 
