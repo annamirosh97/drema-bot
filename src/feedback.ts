@@ -48,7 +48,7 @@ function moscowHour(date: Date): number {
 
 export function withinWindow(date: Date): boolean {
   const hour = moscowHour(date);
-  return hour >= env.FEEDBACK_WINDOW_START && hour < env.FEEDBACK_WINDOW_END;
+  return hour >= env.REMINDER_WINDOW_START && hour < env.REMINDER_WINDOW_END;
 }
 
 // Ближайшее начало окна после указанного момента. Если сейчас раннее
@@ -59,7 +59,7 @@ export function nextWindowOpening(from: Date): Date {
     moscow.getUTCFullYear(),
     moscow.getUTCMonth(),
     moscow.getUTCDate(),
-    env.FEEDBACK_WINDOW_START
+    env.REMINDER_WINDOW_START
   );
   const asUtc = opening - MOSCOW_OFFSET_MS;
   return asUtc > from.getTime() ? new Date(asUtc) : new Date(asUtc + 24 * 3_600_000);

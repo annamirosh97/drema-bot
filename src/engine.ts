@@ -6,6 +6,13 @@ import { buildPrepText, safeGetQuestion } from "./prep";
 import { replyPhotoStatic, replyStatic, sendStatic } from "./send";
 import { allowedToSend, getConsentState } from "./consents";
 import { MENU_CALLBACKS, sendDocs, sendMenu, sendSupport, sendTeam } from "./menu";
+import {
+  QUIZ_DONE_REASON,
+  handleQuizContinue,
+  markQuizActivity,
+  startQuizReminders,
+  stopQuizReminders,
+} from "./quizReminders";
 import { DATA_CALLBACKS, handleDataCallback } from "./dataCommand";
 import {
   FEEDBACK_CALLBACK_PREFIXES,
@@ -112,6 +119,11 @@ async function saveQuestionAnswer(telegramId: bigint, questionNumber: number, an
   const attempt = await currentAttempt(telegramId);
   await prisma.answer.deleteMany({ where: { telegramId, questionNumber, attempt } });
   await prisma.answer.create({ data: { telegramId, questionNumber, answerText, attempt } });
+
+  // Единственное, что считается активностью в анкете. Открытие меню,
+  // документов или поддержки сюда не попадает намеренно: человек мог
+  // зайти за политикой, и к анкете это его не вернуло.
+  await markQuizActivity(telegramId, attempt);
 }
 
 async function getAnswersMap(telegramId: bigint): Promise<Record<number, string>> {
@@ -177,6 +189,10 @@ export async function handleIncoming(ctx: Context) {
 
   if (callbackData === "restart_yes") return confirmRestart(ctx, session);
   if (callbackData === "restart_no") return cancelRestart(ctx, session);
+
+  // Кнопка из напоминания о незаконченной анкете. Тоже до стадий:
+  // напоминание висит в чате, и нажать его могут когда угодно.
+  if (callbackData === "quiz_continue") return handleQuizContinue(ctx, session);
 
   if (!(await allowedWithoutPdConsent(session, callbackData))) {
     return askPdConsentFirst(ctx, session);
@@ -497,6 +513,10 @@ async function confirmRestart(ctx: Context, session: Session) {
     telegramId,
     pending ? "restart_confirmed_cancelled_draft" : "restart_confirmed"
   );
+
+  // Напоминания прошлого прохождения больше не нужны: у нового будут
+  // свои, и начнутся они с показа первого вопроса.
+  await stopQuizReminders(telegramId, session.attempt, "начал анкету заново");
 
   await prisma.session.update({
     where: { telegramId },
@@ -925,6 +945,9 @@ async function startQuestionnaire(ctx: Context, session: Session) {
   await logOnboarding(session.telegramId, "onb_go");
   await replyWithOptionalPhoto(ctx, texts.goStart, photos.goStart, undefined, true);
   await logOnboarding(session.telegramId, "quiz_q1");
+  // Отсчёт напоминаний начинается здесь: до первого вопроса напоминать
+  // не о чем.
+  await startQuizReminders(session.telegramId, await currentAttempt(session.telegramId));
   return sendQuestionPrompt(ctx, getQuestion(first), []);
 }
 
@@ -1315,6 +1338,7 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
     data: { stage: "AWAITING_RECOMMENDATION", status: "completed", currentQuestionNumber: null },
   });
   const attempt = await currentAttempt(telegramId);
+  await stopQuizReminders(telegramId, attempt, QUIZ_DONE_REASON);
   await prisma.recommendation.upsert({
     where: { telegramId_attempt: { telegramId, attempt } },
     update: {},

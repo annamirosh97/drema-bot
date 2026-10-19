@@ -90,6 +90,7 @@ model Session {
   offerEvents     OfferEvent[]
   consultRequests ConsultRequest[]
   upsellOffer     UpsellOffer?
+  quizReminders   QuizReminder[]
 
   @@index([status])
 }
@@ -546,6 +547,16 @@ enum OfferEventType {
   // полем: п.8 ТЗ просит видеть, сколько перезапусков обнулили разбор.
   restart_confirmed_cancelled_draft
   restart_cancelled
+  // Напоминания о незаконченной анкете. Номер напоминания в самом типе:
+  // у OfferEvent нет колонки для данных, а различать их нужно. Номер
+  // вопроса, на котором человек встал, лежит в QuizReminder.
+  quiz_reminder_1_sent
+  quiz_reminder_2_sent
+  quiz_reminder_continue_click
+  quiz_reminder_cancelled
+  quiz_resumed_after_reminder_1
+  quiz_resumed_after_reminder_2
+  quiz_completed_after_reminder
 }
 
 model OfferEvent {
@@ -647,4 +658,49 @@ model UpsellOffer {
   consult ConsultRequest? @relation(fields: [consultRequestId], references: [id], onDelete: SetNull)
 
   @@index([expiresAt])
+}
+
+// Напоминания о незаконченной анкете: через 3 часа и через 24 часа
+// после последнего ответа (см. src/quizReminders.ts).
+//
+// Одна строка на прохождение анкеты, а не на человека: начав заново, он
+// получает право на новые два напоминания, а прошлая строка остаётся —
+// по ней в /stats видно, на каких вопросах люди останавливаются.
+//
+// Строка появляется в момент показа первого вопроса и живёт до конца
+// анкеты. Если напоминания остановлены (анкета пройдена, согласие
+// отозвано, человек заблокировал бота), причина пишется в
+// remindersStoppedReason, и планировщик строку больше не берёт.
+model QuizReminder {
+  id         Int    @id @default(autoincrement())
+  telegramId BigInt
+  attempt    Int    @default(1)
+
+  // Последний ответ на вопрос анкеты. От него считается срок обоих
+  // напоминаний; открытие меню или документов активностью не считается.
+  lastActivityAt DateTime @default(now())
+
+  reminder1ScheduledAt DateTime?
+  reminder1SentAt      DateTime?
+  // На каком вопросе человек стоял, когда ушло первое напоминание.
+  // Здесь, а не в событии: у OfferEvent нет колонки для данных, а топ-5
+  // «где застревают» в /stats строится именно по этому числу.
+  reminder1QuestionNumber Float?
+
+  reminder2ScheduledAt DateTime?
+  reminder2SentAt      DateTime?
+  // Человек ответил хотя бы на один вопрос после первого напоминания:
+  // второе отменяется насовсем, даже если он снова остановится.
+  reminder2Cancelled   Boolean  @default(false)
+
+  remindersStoppedReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+
+  @@unique([telegramId, attempt])
+  @@index([reminder1ScheduledAt])
+  @@index([reminder2ScheduledAt])
 }

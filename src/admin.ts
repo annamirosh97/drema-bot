@@ -175,6 +175,67 @@ export function buildMenuBlock(events: { type: string }[], days: number): string
   return lines.join("\n");
 }
 
+// ── Напоминания анкеты в /stats ─────────────────────────────────────
+
+// Главный вопрос этого блока — работают ли напоминания вообще, то есть
+// сколько людей после них вернулись и сколько дошли до конца. Поэтому
+// считаем по людям, а не по событиям: один человек, вернувшийся после
+// напоминания, — это один вернувшийся, сколько бы вопросов он потом ни
+// ответил.
+//
+// Топ-5 вопросов, на которых останавливаются, берём из QuizReminder, а
+// не из событий: у OfferEvent нет колонки для номера вопроса.
+export function buildQuizReminderBlock(
+  events: { telegramId: bigint; type: string }[],
+  stopQuestions: (number | null)[],
+  days: number
+): string {
+  const users = (type: string) =>
+    new Set(events.filter((e) => e.type === type).map((e) => String(e.telegramId)));
+
+  const sent1 = users("quiz_reminder_1_sent");
+  const sent2 = users("quiz_reminder_2_sent");
+  const resumed1 = users("quiz_resumed_after_reminder_1");
+  const resumed2 = users("quiz_resumed_after_reminder_2");
+  const completed = users("quiz_completed_after_reminder");
+
+  const pct = (part: number, whole: number) =>
+    whole ? `${Math.round((part / whole) * 100)}%` : "—";
+
+  // Дошедшие до конца — только те, кто и возвращался после этого
+  // напоминания: иначе один и тот же человек попал бы в оба счётчика.
+  const completedAfter = (resumed: Set<string>) =>
+    [...completed].filter((id) => resumed.has(id)).length;
+
+  const line = (n: number, sent: Set<string>, resumed: Set<string>) =>
+    `  напоминание ${n}: отправлено ${sent.size}, вернулись ${resumed.size} ` +
+    `(${pct(resumed.size, sent.size)}), дошли до конца ${completedAfter(resumed)}`;
+
+  const lines = [
+    `Напоминания анкеты за ${days} дн.:`,
+    line(1, sent1, resumed1),
+    line(2, sent2, resumed2),
+  ];
+
+  // Где застревают. Строку показываем только когда есть что показать:
+  // «топ-5: —» ничего не сообщает.
+  const counts = new Map<number, number>();
+  for (const q of stopQuestions) {
+    if (q === null) continue;
+    counts.set(q, (counts.get(q) ?? 0) + 1);
+  }
+  if (counts.size) {
+    const top = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+      .slice(0, 5)
+      .map(([question, n]) => `${question} (${n})`)
+      .join(", ");
+    lines.push(`  чаще останавливаются на вопросах: ${top}`);
+  }
+
+  return lines.join("\n");
+}
+
 // ── Обратная связь в /stats ─────────────────────────────────────────
 
 const ANALYSIS_LABELS: Record<string, string> = {
@@ -601,6 +662,7 @@ export function registerAdminCommands(bot: Bot) {
       ageAnswers,
       drafts,
       consultRows,
+      quizStops,
     ] = await Promise.all([
       prisma.session.count(),
       prisma.session.count({ where: { status: "completed" } }),
@@ -638,6 +700,12 @@ export function registerAdminCommands(bot: Bot) {
       }),
       prisma.pdfDraft.findMany({ select: { orderId: true, editedContent: true } }),
       prisma.consultRequest.findMany({ select: { telegramId: true } }),
+      // На каких вопросах останавливаются: берём те прохождения, где
+      // первое напоминание за период уже ушло.
+      prisma.quizReminder.findMany({
+        where: { reminder1SentAt: { gte: since } },
+        select: { reminder1QuestionNumber: true },
+      }),
     ]);
 
     const healthExits = healthExitRows.reduce((sum, row) => sum + row.count, 0);
@@ -770,6 +838,7 @@ export function registerAdminCommands(bot: Bot) {
     await ctx.reply(
       buildOnboardingFunnel(funnelEvents, days) +
         `\n\n${buildMenuBlock(funnelEvents, days)}` +
+        `\n\n${buildQuizReminderBlock(funnelEvents, quizStops.map((r) => r.reminder1QuestionNumber), days)}` +
         `\n\nВсего пользователей: ${total}\n` +
         `Дали согласие на обработку данных: ${granted}\n` +
         `Отказались на согласии: ${declined}\n` +

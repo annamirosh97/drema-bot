@@ -11,6 +11,7 @@ import { registerAdminCommands, handleAdminFlowMessage } from "./admin";
 import { startAdminServer } from "./web/server";
 import { startUpsellScheduler } from "./upsell";
 import { startFeedbackScheduler } from "./feedback";
+import { startQuizReminderScheduler } from "./quizReminders";
 import { startSupportBot } from "./support/bot";
 import { handleDataCommand, handleUnsubscribeCommand } from "./dataCommand";
 import { loadLegalDocuments } from "./legalDocs";
@@ -128,6 +129,8 @@ async function main() {
   startUpsellScheduler(bot.api);
   // Отложенные вопросы: о разборе через сутки, о плане через неделю.
   startFeedbackScheduler(bot.api);
+  // Напоминания тем, кто остановился посреди анкеты: через 3 и 24 часа.
+  startQuizReminderScheduler(bot.api);
   // Бот поддержки — отдельный бот в этом же процессе. Запускаем до
   // bot.start(): тот не возвращается, пока основной бот живёт. Без
   // токена поддержка просто не поднимается.

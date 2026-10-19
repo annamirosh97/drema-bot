@@ -89,8 +89,26 @@ export const env = {
   FREE_ANALYSIS_FEEDBACK_DELAY_HOURS:
     parseInt(process.env.FREE_ANALYSIS_FEEDBACK_DELAY_HOURS ?? "24", 10) || 24,
   PDF_FEEDBACK_DELAY_DAYS: parseInt(process.env.PDF_FEEDBACK_DELAY_DAYS ?? "7", 10) || 7,
-  FEEDBACK_WINDOW_START: parseInt(process.env.FEEDBACK_WINDOW_START ?? "10", 10) || 10,
-  FEEDBACK_WINDOW_END: parseInt(process.env.FEEDBACK_WINDOW_END ?? "21", 10) || 21,
+  // Окно одно на все сообщения, которые бот отправляет по своей
+  // инициативе: отложенные вопросы и напоминания о незаконченной
+  // анкете. Две независимые пары переменных однажды разъехались бы
+  // молча, и ночью приходило бы то, что ночью приходить не должно.
+  //
+  // FEEDBACK_WINDOW_* читается как запасной вариант: именно он задан на
+  // проде, и переезд на новое имя не должен ничего сломать.
+  REMINDER_WINDOW_START: parseInt(
+    process.env.REMINDER_WINDOW_START ?? process.env.FEEDBACK_WINDOW_START ?? "10",
+    10
+  ) || 10,
+  REMINDER_WINDOW_END: parseInt(
+    process.env.REMINDER_WINDOW_END ?? process.env.FEEDBACK_WINDOW_END ?? "21",
+    10
+  ) || 21,
+  // Через сколько часов после последнего ответа напоминать о
+  // незаконченной анкете. Второе напоминание приходит, только если
+  // после первого человек так и не ответил.
+  QUIZ_REMINDER_1_HOURS: parseInt(process.env.QUIZ_REMINDER_1_HOURS ?? "3", 10) || 3,
+  QUIZ_REMINDER_2_HOURS: parseInt(process.env.QUIZ_REMINDER_2_HOURS ?? "24", 10) || 24,
   // Бот поддержки — отдельный бот в этом же процессе. Без токена он
   // просто не поднимается, основной работает как обычно.
   // Username основного бота без «@»: подставляется там, где на него

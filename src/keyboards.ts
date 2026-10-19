@@ -98,6 +98,26 @@ export function supportLinkKeyboard(botUsername: string, withBack = false): Inli
   return withBack ? keyboard.row().text(BACK_TO_QUIZ, "menu_back") : keyboard;
 }
 
+// ── Напоминания о незаконченной анкете ──────────────────────────────
+
+export const QUIZ_CONTINUE = "Продолжить анкету";
+
+// Первое напоминание: одна кнопка.
+export function quizReminder1Keyboard(): InlineKeyboard {
+  return new InlineKeyboard().text(QUIZ_CONTINUE, "quiz_continue");
+}
+
+// Второе: плюс ссылка в поддержку, если бот поддержки задан. Параметр
+// src_quiz_reminder доезжает до карточки обращения — по нему видно, что
+// человек пришёл из напоминания, а не из меню.
+export function quizReminder2Keyboard(botUsername: string): InlineKeyboard {
+  const keyboard = new InlineKeyboard().text(QUIZ_CONTINUE, "quiz_continue");
+  if (!botUsername) return keyboard;
+  return keyboard
+    .row()
+    .url("Написать в поддержку", `https://t.me/${botUsername}?start=src_quiz_reminder`);
+}
+
 // ── Управление согласиями (/data) ───────────────────────────────────
 //
 // Подписи кнопок уходят в журнал как есть, поэтому живут константами.
