@@ -16,6 +16,11 @@ import {
 import { formatUsd } from "./claudeApi";
 import { consultUrl, consentUrl, orderUrl } from "./web/server";
 import { formatMoscow, getConsentState } from "./consents";
+import {
+  answersOfCurrentAttempt,
+  currentRecommendation,
+  lastCancelledRecommendation,
+} from "./attempt";
 
 function isAdmin(ctx: Context): boolean {
   return String(ctx.from?.id ?? "") === env.ADMIN_TELEGRAM_ID;
@@ -135,6 +140,41 @@ export function buildOnboardingFunnel(events: FunnelEvent[], days: number): stri
   );
 }
 
+// ── Меню в /stats ───────────────────────────────────────────────────
+
+// Здесь, в отличие от воронки онбординга, считаем события, а не людей:
+// вопрос «сколько раз открывали меню» — про использование, и человек,
+// заходивший в него пять раз, это пять заходов, а не один.
+//
+// «Начали заново» показываем двумя числами: сколько раз спрашивали и
+// сколько раз подтвердили. Разница между ними — те, кто передумал,
+// увидев предупреждение, и это самое интересное в этом блоке.
+export function buildMenuBlock(events: { type: string }[], days: number): string {
+  const count = (type: string) => events.filter((e) => e.type === type).length;
+
+  const asked = count("restart_asked");
+  const confirmedClean = count("restart_confirmed");
+  const confirmedWithDraft = count("restart_confirmed_cancelled_draft");
+  const confirmed = confirmedClean + confirmedWithDraft;
+
+  const lines = [
+    `Меню за ${days} дн.:`,
+    `  открывали: ${count("menu_opened")}`,
+    `  поддержка: ${count("menu_support")}`,
+    `  документы: ${count("menu_docs")}`,
+    `  команда Дрёмы: ${count("menu_team")}`,
+    `  начать заново: спросили ${asked}, подтвердили ${confirmed}`,
+  ];
+
+  // Строку про отменённые разборы показываем только когда такое было:
+  // ноль здесь — норма, и постоянная строка о нём только мешала бы.
+  if (confirmedWithDraft) {
+    lines.push(`    из них с отменой готовившегося разбора: ${confirmedWithDraft}`);
+  }
+
+  return lines.join("\n");
+}
+
 // ── Обратная связь в /stats ─────────────────────────────────────────
 
 const ANALYSIS_LABELS: Record<string, string> = {
@@ -207,6 +247,18 @@ interface SendFlowState {
 // это ты сама, действие короткое и разовое, БД для этого не нужна.
 const sendFlows = new Map<number, SendFlowState>();
 
+// Разбор, отменённый перезапуском анкеты. Объяснение одно для /draft,
+// /approve и /send: иначе в трёх местах разошлись бы формулировки, а
+// случай редкий и непонятный — человек начал заново, пока ты держал его
+// черновик открытым.
+function cancelledNote(telegramId: bigint): string {
+  return (
+    `Разбор для #${telegramId} отменён: человек начал анкету заново.\n\n` +
+    `Отправлять его нельзя — он про ответы, которые человек уже переписал. ` +
+    `Когда он закончит новую анкету, черновик придёт на проверку сам.`
+  );
+}
+
 export function registerAdminCommands(bot: Bot) {
   bot.command("pending", async (ctx) => {
     if (!isAdmin(ctx)) return;
@@ -253,6 +305,20 @@ export function registerAdminCommands(bot: Bot) {
     const session = await prisma.session.findUnique({ where: { telegramId } });
     if (!session) return ctx.reply("Такого пользователя нет в базе.");
 
+    // Проверяем до сбора сообщений, а не после: писать два сообщения
+    // вручную и узнать в конце, что отправлять их некуда, — обидно.
+    const existing = await currentRecommendation(telegramId);
+    if (existing?.status === "cancelled") return ctx.reply(cancelledNote(telegramId));
+    if (!existing) {
+      if (await lastCancelledRecommendation(telegramId)) {
+        return ctx.reply(cancelledNote(telegramId));
+      }
+      return ctx.reply(
+        `#${telegramId} ещё не завершил анкету — отправлять разбор пока некуда.\n\n` +
+          `Кто закончил и ждёт: /pending`
+      );
+    }
+
     sendFlows.set(ctx.from!.id, { telegramId, chatId: session.chatId, messages: [], stage: "collecting" });
     await ctx.reply(`Собираю разбор для #${telegramId}. Пришли сообщение 1 из 2.\n\nОтменить в любой момент — /cancel`);
   });
@@ -270,8 +336,13 @@ export function registerAdminCommands(bot: Bot) {
       return ctx.reply("telegram_id должен быть числом.");
     }
 
-    const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+    const recommendation = await currentRecommendation(telegramId);
     if (!recommendation) {
+      // Сразу после перезапуска разбора нет, но причина не в том, что
+      // человек не дошёл до конца: его черновик отменили.
+      if (await lastCancelledRecommendation(telegramId)) {
+        return ctx.reply(cancelledNote(telegramId));
+      }
       return ctx.reply(
         `#${telegramId} ещё не подтвердил анкету — готовить черновик не из чего.\n\n` +
           `Кто закончил и ждёт разбора: /pending`
@@ -284,6 +355,7 @@ export function registerAdminCommands(bot: Bot) {
           `Если нужна другая версия — /send ${telegramId}`
       );
     }
+    if (recommendation.status === "cancelled") return ctx.reply(cancelledNote(telegramId));
 
     // Не ждём результата: бот обрабатывает сообщения по одному, и ожидание
     // ответа модели заморозило бы его для остальных на десятки секунд.
@@ -305,8 +377,14 @@ export function registerAdminCommands(bot: Bot) {
       return ctx.reply("telegram_id должен быть числом.");
     }
 
-    const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+    const recommendation = await currentRecommendation(telegramId);
     if (!recommendation?.message1 || !recommendation?.message2) {
+      if (
+        recommendation?.status === "cancelled" ||
+        (!recommendation && (await lastCancelledRecommendation(telegramId)))
+      ) {
+        return ctx.reply(cancelledNote(telegramId));
+      }
       return ctx.reply(
         `Черновика для #${telegramId} нет — видимо, автоматическая подготовка не сработала.\n\n` +
           `Собрать вручную: /prep ${telegramId}, затем /send ${telegramId}`
@@ -316,6 +394,7 @@ export function registerAdminCommands(bot: Bot) {
       const when = recommendation.sentAt?.toLocaleString("ru-RU") ?? "раньше";
       return ctx.reply(`Разбор для #${telegramId} уже отправлен (${when}).`);
     }
+    if (recommendation.status === "cancelled") return ctx.reply(cancelledNote(telegramId));
 
     const session = await prisma.session.findUnique({ where: { telegramId } });
     if (!session) return ctx.reply("Такого пользователя нет в базе.");
@@ -335,7 +414,7 @@ export function registerAdminCommands(bot: Bot) {
     const telegramId = parseTelegramId(ctx.match?.toString());
     if (telegramId === null) return ctx.reply("Использование: /analysis <telegram_id>");
 
-    const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+    const recommendation = await currentRecommendation(telegramId);
     if (!recommendation?.analysis) {
       return ctx.reply(`Выводов анализа для #${telegramId} нет — черновик ещё не готовили.`);
     }
@@ -351,7 +430,9 @@ export function registerAdminCommands(bot: Bot) {
     const telegramId = parseTelegramId(ctx.match?.toString());
     if (telegramId === null) return ctx.reply("Использование: /regen <telegram_id>");
 
-    const answers = await prisma.answer.count({ where: { telegramId } });
+    const answers = await prisma.answer.count({
+      where: await answersOfCurrentAttempt(telegramId),
+    });
     if (!answers) return ctx.reply(`У #${telegramId} нет сохранённых ответов — прогонять нечего.`);
 
     // Не ждём результата: бот обрабатывает сообщения по одному, и ожидание
@@ -391,7 +472,7 @@ export function registerAdminCommands(bot: Bot) {
     const session = await prisma.session.findUnique({ where: { telegramId } });
     if (!session) return ctx.reply("Такого пользователя нет в базе.");
 
-    const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+    const recommendation = await currentRecommendation(telegramId);
     if (!recommendation?.analysis || !recommendation.message1 || !recommendation.message2) {
       return ctx.reply(
         `У #${telegramId} нет готового разбора — план собирать не из чего.\n\n` +
@@ -423,7 +504,7 @@ export function registerAdminCommands(bot: Bot) {
     const session = await prisma.session.findUnique({ where: { telegramId } });
     if (!session) return ctx.reply("Такого пользователя нет в базе.");
 
-    const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+    const recommendation = await currentRecommendation(telegramId);
     const warning = recommendation?.message1
       ? ""
       : `\n\n⚠️ У #${telegramId} нет готового разбора. Если он нажмёт «Купить», ` +
@@ -552,6 +633,7 @@ export function registerAdminCommands(bot: Bot) {
       prisma.pdfFeedback.findMany({ where: { createdAt: { gte: since } } }),
       prisma.answer.findMany({
         where: { questionNumber: 1 },
+        orderBy: { createdAt: "asc" },
         select: { telegramId: true, answerText: true },
       }),
       prisma.pdfDraft.findMany({ select: { orderId: true, editedContent: true } }),
@@ -601,6 +683,9 @@ export function registerAdminCommands(bot: Bot) {
     const withoutExample = [...shown].filter((id) => !sawExample.has(id));
     const boughtWithoutExample = [...bought].filter((id) => !sawExample.has(id)).length;
 
+    // Строки отсортированы от старых к новым, и Map оставляет
+    // последнее значение: у прошедшего анкету дважды берётся свежий
+    // возраст, а не тот, что он называл месяцы назад.
     const ageByUser = new Map(ageAnswers.map((a) => [String(a.telegramId), Number(a.answerText)]));
     const editedByOrder = new Map(drafts.map((d) => [d.orderId, d.editedContent !== null]));
     const withConsult = new Set(consultRows.map((c) => String(c.telegramId)));
@@ -684,6 +769,7 @@ export function registerAdminCommands(bot: Bot) {
 
     await ctx.reply(
       buildOnboardingFunnel(funnelEvents, days) +
+        `\n\n${buildMenuBlock(funnelEvents, days)}` +
         `\n\nВсего пользователей: ${total}\n` +
         `Дали согласие на обработку данных: ${granted}\n` +
         `Отказались на согласии: ${declined}\n` +

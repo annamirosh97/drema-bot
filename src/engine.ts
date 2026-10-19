@@ -4,7 +4,8 @@ import { env } from "./env";
 import { formatPrice, photos, texts } from "./texts";
 import { buildPrepText, safeGetQuestion } from "./prep";
 import { replyPhotoStatic, replyStatic, sendStatic } from "./send";
-import { allowedToSend } from "./consents";
+import { allowedToSend, getConsentState } from "./consents";
+import { MENU_CALLBACKS, sendDocs, sendMenu, sendSupport, sendTeam } from "./menu";
 import { DATA_CALLBACKS, handleDataCallback } from "./dataCommand";
 import {
   FEEDBACK_CALLBACK_PREFIXES,
@@ -15,7 +16,6 @@ import {
 } from "./feedback";
 import {
   remindAboutConsentOnce,
-  remindAboutStuckConsults,
   startConsultRequest,
   takeConsultContact,
   takeConsultSelfWrite,
@@ -68,8 +68,17 @@ import {
   summaryKeyboard,
   welcomeKeyboard,
   welcomeValueKeyboard,
+  backToQuizKeyboard,
+  restartConfirmKeyboard,
 } from "./keyboards";
 import type { Session } from "@prisma/client";
+import {
+  answersOfCurrentAttempt,
+  currentAttempt,
+  currentRecommendation,
+  lastCancelledRecommendation,
+  pendingRecommendation,
+} from "./attempt";
 
 // ── Вспомогательные функции работы с БД ─────────────────────────────
 
@@ -88,19 +97,25 @@ async function getOrCreateSession(telegramId: bigint, chatId: bigint, firstName?
 // 15.10.2026: отказ от согласия — это ответ, а не повод расспрашивать.
 // Старые записи остались в базе нетронутыми.
 async function saveAnswer(telegramId: bigint, questionNumber: number, answerText: string) {
-  await prisma.answer.create({ data: { telegramId, questionNumber, answerText } });
+  const attempt = await currentAttempt(telegramId);
+  await prisma.answer.create({ data: { telegramId, questionNumber, answerText, attempt } });
 }
 
 // Ответ на вопрос анкеты: один вопрос — одна строка в базе. Пользователь
 // может переписать ответ через «Внести изменения» в конце, и тогда
 // старый должен исчезнуть, иначе в /prep попадут оба варианта сразу.
+//
+// Удаляем только в пределах текущего прохождения: ответ на тот же
+// вопрос из прошлого прохождения — это не черновик, а история, и
+// переписывать её правка ответа не должна.
 async function saveQuestionAnswer(telegramId: bigint, questionNumber: number, answerText: string) {
-  await prisma.answer.deleteMany({ where: { telegramId, questionNumber } });
-  await prisma.answer.create({ data: { telegramId, questionNumber, answerText } });
+  const attempt = await currentAttempt(telegramId);
+  await prisma.answer.deleteMany({ where: { telegramId, questionNumber, attempt } });
+  await prisma.answer.create({ data: { telegramId, questionNumber, answerText, attempt } });
 }
 
 async function getAnswersMap(telegramId: bigint): Promise<Record<number, string>> {
-  const rows = await prisma.answer.findMany({ where: { telegramId } });
+  const rows = await prisma.answer.findMany({ where: await answersOfCurrentAttempt(telegramId) });
   const map: Record<number, string> = {};
   for (const r of rows) map[r.questionNumber] = r.answerText;
   return map;
@@ -151,6 +166,18 @@ export async function handleIncoming(ctx: Context) {
     return handleFeedbackCallback(ctx, callbackData);
   }
 
+  // Меню разбираем до проверки согласия, и это осознанно: в нём лежат
+  // «Документы», то есть ровно то, что человек может захотеть прочитать
+  // ПЕРЕД тем, как дать согласие. Пустить дальше анкеты это не может:
+  // «Начать заново» ведёт на экран «Прежде чем начать», а оттуда — на
+  // согласие, если его нет.
+  if (callbackData && MENU_CALLBACKS.has(callbackData)) {
+    return handleMenuCallback(ctx, session, callbackData);
+  }
+
+  if (callbackData === "restart_yes") return confirmRestart(ctx, session);
+  if (callbackData === "restart_no") return cancelRestart(ctx, session);
+
   if (!(await allowedWithoutPdConsent(session, callbackData))) {
     return askPdConsentFirst(ctx, session);
   }
@@ -190,6 +217,12 @@ export async function handleIncoming(ctx: Context) {
   // Кнопка «Прислать гид» живёт в ветке «не подходит», где сессия уже
   // вернулась в исходное состояние, — поэтому разбираем её до стадий.
   if (callbackData === "health_guide") return sendHealthGuide(ctx);
+
+  // Команда, которую бот не знает. Ответом на вопрос анкеты она быть не
+  // может: показываем текущий экран заново и ничего не сохраняем.
+  if (messageText && looksLikeCommand(messageText)) {
+    return resendCurrentStep(ctx, session);
+  }
 
   switch (session.stage) {
     case "TERMS_HEALTH":
@@ -236,6 +269,310 @@ export async function handleIncoming(ctx: Context) {
     case "RED_FLAG_ENDED":
       return resetToWelcomeAndSend(ctx, session);
   }
+}
+
+// ── Возврат к прерванному шагу (кнопка из меню) ─────────────────────
+//
+// Меню можно открыть в любой момент, в том числе посреди анкеты. Чтобы
+// человек не остался без последнего вопроса под стопкой новых
+// сообщений, пункты меню заканчиваются кнопкой «Вернуться к анкете»,
+// которая просто присылает текущий экран заново.
+//
+// Стадии перечислены явно, а не через вызов обработчиков: обработчик,
+// позванный без ввода, местами отвечает «напишите ответ текстом», и
+// для возврата это не годится.
+
+// Ждёт ли бот от человека ответа или нажатия. Если нет — возвращаться
+// некуда, и кнопку показывать не нужно.
+export function isWaitingForUser(session: Session): boolean {
+  switch (session.stage) {
+    // Приветственные экраны намеренно не считаются: на них анкета ещё
+    // не началась, и кнопка «Вернуться к анкете» обещала бы то, чего
+    // нет. Эти экраны к тому же всего на одно сообщение выше в чате.
+    case "WELCOME":
+    case "WELCOME_VALUE":
+    case "HOW_IT_WORKS":
+      return false;
+    case "TERMS":
+    case "TERMS_HEALTH":
+    case "HEALTH_SCREEN":
+    case "PD_CONSENT":
+    case "MARKETING_CONSENT":
+    case "QUESTION":
+    case "SUMMARY_REVIEW":
+    case "EDIT_PICK_QUESTION":
+    case "EDIT_ANSWER":
+    case "EDIT_MORE":
+    case "FAKE_DOOR_OFFER":
+    case "CSAT_RATING":
+    case "CSAT_FEEDBACK":
+      return true;
+    // Анкета сдана и разбор готовится, всё пройдено, анкета остановлена
+    // — здесь бот ничего не ждёт.
+    default:
+      return false;
+  }
+}
+
+// Присылает текущий экран заново. Состояние сессии не меняет.
+export async function resendCurrentStep(ctx: Context, session: Session) {
+  switch (session.stage) {
+    case "WELCOME":
+      return sendWelcome(ctx);
+    case "WELCOME_VALUE":
+      return sendWelcomeValue(ctx);
+    case "HOW_IT_WORKS":
+      return replyStatic(ctx, texts.howItWorks, {
+        reply_markup: new InlineKeyboard().text("Начать", "start"),
+      });
+    case "TERMS":
+    case "TERMS_HEALTH":
+    case "HEALTH_SCREEN":
+      return sendTermsHealth(ctx);
+    case "PD_CONSENT":
+      return sendPdConsent(ctx);
+    case "MARKETING_CONSENT":
+      return sendMarketingConsent(ctx);
+    case "QUESTION":
+    case "EDIT_ANSWER": {
+      const qNum = session.currentQuestionNumber;
+      const question = qNum == null ? null : safeGetQuestion(qNum);
+      // Вопрос мог быть убран из анкеты: возвращать человека некуда,
+      // но и молчать нельзя — показываем начало.
+      if (!question) return sendWelcome(ctx);
+      return sendQuestionPrompt(ctx, question, session.tempSelections);
+    }
+    case "SUMMARY_REVIEW":
+      return sendSummary(ctx, session.telegramId);
+    case "EDIT_PICK_QUESTION":
+    case "EDIT_MORE":
+      // У правки ответов свой короткий диалог; его начало — итоговая
+      // анкета, с неё и продолжаем.
+      return sendSummary(ctx, session.telegramId);
+    case "FAKE_DOOR_OFFER":
+      return sendOfferMessages(ctx.api, session.chatId);
+    case "CSAT_RATING":
+      return replyStatic(ctx, texts.csatPrompt, { reply_markup: csatKeyboard() });
+    case "CSAT_FEEDBACK":
+      return replyStatic(ctx, texts.csatFeedbackPrompt);
+    default:
+      return;
+  }
+}
+
+// ── Меню: маршрутизация и перезапуск анкеты ─────────────────────────
+
+// Пункт меню присылает новое сообщение, а само меню не трогает: п.2 ТЗ
+// просит, чтобы оно осталось рабочим и после нажатия.
+async function handleMenuCallback(ctx: Context, session: Session, callbackData: string) {
+  const back = isWaitingForUser(session);
+
+  switch (callbackData) {
+    case "menu_restart":
+      await logOfferEvent(session.telegramId, "restart_asked");
+      return askRestart(ctx, session);
+    case "menu_support":
+      await logOfferEvent(session.telegramId, "menu_support");
+      return sendSupport(ctx, back);
+    case "menu_docs":
+      await logOfferEvent(session.telegramId, "menu_docs");
+      return sendDocs(ctx, back);
+    case "menu_team":
+      await logOfferEvent(session.telegramId, "menu_team");
+      return sendTeam(ctx, back);
+    case "menu_back":
+      return resendCurrentStep(ctx, session);
+  }
+}
+
+// Команды меню: /menu, /support, /docs, /team, /restart.
+//
+// Начинаем с того же, с чего handleIncoming: закрытый режим — первым
+// делом, до всякой записи в базу. Команда для человека не из списка не
+// должна оставить даже сессии.
+//
+// Согласие на обработку данных здесь не проверяется по той же причине,
+// по которой не проверяется в handleIncoming для кнопок меню: в меню
+// лежат «Документы», и читать их человек вправе до согласия. В анкету
+// меню не ведёт — «Начать заново» упирается в экран согласия.
+export type MenuCommand = "menu" | "support" | "docs" | "team" | "restart";
+
+export async function handleMenuCommand(ctx: Context, which: MenuCommand) {
+  const from = ctx.from;
+  if (!from || !ctx.chat) return;
+
+  if (!isAllowed(from.id)) return replyStatic(ctx, texts.notOpenYet);
+
+  const session = await getOrCreateSession(
+    BigInt(from.id),
+    BigInt(ctx.chat.id),
+    from.first_name
+  );
+  const back = isWaitingForUser(session);
+
+  switch (which) {
+    case "menu":
+      await logOfferEvent(session.telegramId, "menu_opened");
+      return sendMenu(ctx);
+    case "support":
+      await logOfferEvent(session.telegramId, "menu_support");
+      return sendSupport(ctx, back);
+    case "docs":
+      await logOfferEvent(session.telegramId, "menu_docs");
+      return sendDocs(ctx, back);
+    case "team":
+      await logOfferEvent(session.telegramId, "menu_team");
+      return sendTeam(ctx, back);
+    case "restart":
+      await logOfferEvent(session.telegramId, "restart_asked");
+      return askRestart(ctx, session);
+  }
+}
+
+// Подтверждение перезапуска. Предупреждение про готовящийся разбор
+// встаёт перед кнопками: человек должен узнать о потере до того, как
+// нажмёт, а не после.
+async function askRestart(ctx: Context, session: Session) {
+  const pending = await pendingRecommendation(session.telegramId);
+  const text = pending
+    ? `${texts.restartConfirm}\n\n${texts.restartPendingWarning}`
+    : texts.restartConfirm;
+
+  return replyStatic(ctx, text, { reply_markup: restartConfirmKeyboard() });
+}
+
+// Обе кнопки подтверждения заменяют текст самого сообщения и убирают
+// клавиатуру: п.3 требует, чтобы повторное нажатие ничего не делало, а
+// без клавиатуры нажать второй раз просто нечего.
+async function replaceConfirmMessage(ctx: Context, text: string, keyboard?: InlineKeyboard) {
+  const markup = keyboard ? { reply_markup: keyboard } : undefined;
+  try {
+    await ctx.editMessageText(text, markup);
+  } catch (error) {
+    // Сообщение могли удалить, или оно слишком старое для правки.
+    // Тогда отвечаем обычным сообщением: человек должен увидеть ответ.
+    console.error("Не удалось заменить сообщение подтверждения:", error);
+    await replyStatic(ctx, text, markup);
+  }
+}
+
+async function cancelRestart(ctx: Context, session: Session) {
+  await logOfferEvent(session.telegramId, "restart_cancelled");
+
+  // Кнопка возврата встаёт на то же сообщение, а не приходит вторым:
+  // иначе человек увидел бы «Хорошо, продолжаем» дважды.
+  return replaceConfirmMessage(
+    ctx,
+    texts.restartCancelled,
+    isWaitingForUser(session) ? backToQuizKeyboard() : undefined
+  );
+}
+
+// Собственно перезапуск. Ничего не удаляет: прохождение получает новый
+// номер, и всё прошлое остаётся в базе, просто перестаёт попадать в
+// новый разбор (см. attempt.ts).
+async function confirmRestart(ctx: Context, session: Session) {
+  const telegramId = session.telegramId;
+
+  // Повторное нажатие. Кнопки убираются вместе с текстом сообщения, так
+  // что обычно нажать второй раз нечего, — но если человек открыл меню
+  // дважды, в чате висят два подтверждения, и у второго кнопки живые.
+  //
+  // Признак того, что перезапуск уже случился: человек стоит на первом
+  // экране нового прохождения и ответить ещё ничего не успел. Второй
+  // раз номер прохождения не увеличиваем, иначе в базе появились бы
+  // пустые прохождения, а в /stats — лишние перезапуски.
+  if (session.stage === "TERMS_HEALTH") {
+    const answers = await prisma.answer.count({
+      where: await answersOfCurrentAttempt(telegramId),
+    });
+    if (!answers) {
+      await replaceConfirmMessage(ctx, texts.restartStarted);
+      return sendTermsHealth(ctx);
+    }
+  }
+
+  // Разбор, который ждал проверки, не придёт: он про ответы, которые
+  // человек сейчас перепишет. Отменяем до смены номера прохождения,
+  // пока он ещё считается текущим.
+  const pending = await pendingRecommendation(telegramId);
+  if (pending) {
+    await prisma.recommendation.update({
+      where: { id: pending.id },
+      data: {
+        status: "cancelled",
+        cancelReason: "пользователь начал заново",
+        cancelledAt: new Date(),
+      },
+    });
+  }
+
+  await logOfferEvent(
+    telegramId,
+    pending ? "restart_confirmed_cancelled_draft" : "restart_confirmed"
+  );
+
+  await prisma.session.update({
+    where: { telegramId },
+    data: {
+      attempt: { increment: 1 },
+      stage: "TERMS_HEALTH",
+      status: "onboarding",
+      currentQuestionNumber: null,
+      resumeStage: null,
+      tempSelections: [],
+      yellowFlags: [],
+    },
+  });
+
+  await replaceConfirmMessage(ctx, texts.restartStarted);
+
+  // Дальше путь онбординга без приветствия: экран «Прежде чем начать»
+  // показывается снова, потому что состояние малыша могло измениться.
+  return sendTermsHealth(ctx);
+}
+
+// Куда идти после «Прежде чем начать».
+//
+// У того, кто начал заново, согласия, на которые ответ уже есть в
+// журнале, второй раз не спрашиваем (п.3 ТЗ). Первое прохождение идёт
+// ровно как раньше — через экран согласия на данные, — и отличаем мы их
+// по номеру прохождения, а не по новому полю: attempt > 1 бывает только
+// после «Начать заново».
+//
+// Почему не пропускать согласия всем, у кого ответ уже есть: у тех, кто
+// начал пользоваться ботом до появления согласий, экраны показываются
+// посреди сценария, и этот путь менять не просили.
+async function afterTermsHealth(ctx: Context, session: Session) {
+  if (session.attempt <= 1) return goToPdConsent(ctx, session);
+
+  const state = await getConsentState(session.telegramId);
+
+  // Без согласия на обработку данных дальше нельзя никому и никогда.
+  if (state.PD_PROCESSING.action !== "GRANTED") return goToPdConsent(ctx, session);
+
+  // Про рассылку спрашиваем, только если человек ещё не отвечал. Отказ —
+  // это тоже ответ, и переспрашивать его неприлично.
+  const marketing = state.MARKETING.action;
+  if (marketing !== "GRANTED" && marketing !== "DECLINED") {
+    return goToMarketingConsent(ctx, session);
+  }
+
+  return startQuestionnaire(ctx, session);
+}
+
+// ── Команды, набранные посреди сценария ─────────────────────────────
+
+// Команда — это не ответ на вопрос. До появления меню такое сообщение
+// сохранялось как ответ: человек писал «/start» посреди анкеты, и
+// строка «/start» уезжала в разбор, а в ожидании разбора — в
+// дополнения к анкете. Незарегистрированные команды до сих могут
+// прийти сюда, и сохранять их нельзя.
+//
+// Зарегистрированные команды (/menu, /data и прочие) сюда не доходят
+// вовсе: grammY разбирает их раньше общего обработчика текста.
+function looksLikeCommand(text: string): boolean {
+  return /^\/[A-Za-z0-9_]+(@[A-Za-z0-9_]+)?(\s|$)/.test(text);
 }
 
 // ── Закрытый режим ──────────────────────────────────────────────────
@@ -426,7 +763,7 @@ async function handleTermsHealth(ctx: Context, session: Session, callbackData?: 
     if (!saved) return;
 
     await dropKeyboard(ctx);
-    return goToPdConsent(ctx, session);
+    return afterTermsHealth(ctx, session);
   }
 
   if (callbackData === "health_stop") return handleHealthExit(ctx, session);
@@ -991,10 +1328,11 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
     where: { telegramId },
     data: { stage: "AWAITING_RECOMMENDATION", status: "completed", currentQuestionNumber: null },
   });
+  const attempt = await currentAttempt(telegramId);
   await prisma.recommendation.upsert({
-    where: { telegramId },
+    where: { telegramId_attempt: { telegramId, attempt } },
     update: {},
-    create: { telegramId, status: "pending" },
+    create: { telegramId, attempt, status: "pending" },
   });
 
   // Всё, что дальше, запускаем в фоне и результата не ждём: обращение к
@@ -1073,6 +1411,13 @@ export function draftInProgressNote(telegramId: bigint): string {
 export async function generateDraftForAdmin(api: Api, telegramId: bigint) {
   const adminChatId = Number(env.ADMIN_TELEGRAM_ID);
 
+  // Прохождение запоминаем до генерации, а не после. Модель отвечает
+  // десятки секунд, и за это время человек успевает нажать «Начать
+  // заново»: тогда черновик должен лечь в ту строку, по ответам которой
+  // его и считали, а не в новую. Если ту строку уже отменили, черновик
+  // просто останется в ней неотправленным.
+  const attempt = await currentAttempt(telegramId);
+
   try {
     await api.sendMessage(adminChatId, draftInProgressNote(telegramId));
 
@@ -1080,7 +1425,7 @@ export async function generateDraftForAdmin(api: Api, telegramId: bigint) {
     await recordApiCalls(draft.usage);
 
     await prisma.recommendation.update({
-      where: { telegramId },
+      where: { telegramId_attempt: { telegramId, attempt } },
       data: { message1: draft.message1, message2: draft.message2, analysis: draft.analysis },
     });
 
@@ -1099,7 +1444,10 @@ export async function generateDraftForAdmin(api: Api, telegramId: bigint) {
     // писать разбор нельзя. Родителю ничего не отправляем.
     if (error instanceof RedFlagError) {
       await prisma.recommendation
-        .update({ where: { telegramId }, data: { analysis: error.analysis } })
+        .update({
+          where: { telegramId_attempt: { telegramId, attempt } },
+          data: { analysis: error.analysis },
+        })
         .catch((dbError) => console.error("Не удалось сохранить выводы анализа:", dbError));
       await api
         .sendMessage(
@@ -1131,7 +1479,7 @@ export async function keepLastRegen(telegramId: bigint): Promise<boolean> {
   if (!draft) return false;
 
   await prisma.recommendation.update({
-    where: { telegramId },
+    where: { telegramId_attempt: { telegramId, attempt: await currentAttempt(telegramId) } },
     data: { analysis: draft.analysis, message1: draft.message1, message2: draft.message2 },
   });
   lastRegen.delete(String(telegramId));
@@ -1275,7 +1623,10 @@ async function afterEditSaved(ctx: Context, telegramId: bigint) {
   const stale = QUESTIONS.filter((q) => q.skipUnless && !q.skipUnless(answers) && answers[q.number] != null);
   if (stale.length) {
     await prisma.answer.deleteMany({
-      where: { telegramId, questionNumber: { in: stale.map((q) => q.number) } },
+      where: {
+        ...(await answersOfCurrentAttempt(telegramId)),
+        questionNumber: { in: stale.map((q) => q.number) },
+      },
     });
     await replyStatic(ctx, texts.editStaleRemoved);
     answers = await getAnswersMap(telegramId);
@@ -1357,14 +1708,20 @@ export async function handleGotoCommand(ctx: Context, arg: string) {
   return sendQuestionPrompt(ctx, question, []);
 }
 
-// /reset — вернуть пользователя на самое начало (экран приветствия)
-// и стереть его ответы, чтобы следующий проход был с чистого листа.
+// /reset — стереть ответы человека совсем и вернуть его на приветствие.
 // Ждущую отправки рекомендацию тоже удаляем: анкета, под которую её
 // готовили, только что стёрлась, и висеть в /pending ей незачем.
 // События оффера намеренно остаются — на них держится /stats.
+//
+// Только для админа, и это важно. Обычный человек начинает заново
+// командой /restart, которая ничего не удаляет (см. restart.ts): его
+// ответы — это данные о ребёнке, и бот их не стирает по нажатию. А
+// здесь нужен именно чистый лист — для прогона анкеты на себе, когда
+// прошлые прохождения в базе только мешают.
 export async function handleResetCommand(ctx: Context) {
   const from = ctx.from;
   if (!from || !ctx.chat) return;
+  if (String(from.id) !== env.ADMIN_TELEGRAM_ID) return;
 
   const telegramId = BigInt(from.id);
   await getOrCreateSession(telegramId, BigInt(ctx.chat.id), from.first_name);
@@ -1380,6 +1737,9 @@ export async function handleResetCommand(ctx: Context) {
       resumeStage: null,
       tempSelections: [],
       yellowFlags: [],
+      // Прохождения начинаются заново: ответов в базе больше нет, и
+      // держать номер высоким незачем.
+      attempt: 1,
     },
   });
 
@@ -1594,7 +1954,13 @@ async function handleBuy(ctx: Context, session: Session) {
 
 export async function createPdfOrder(telegramId: bigint) {
   return prisma.order.create({
-    data: { telegramId, product: "PDF", priceRub: env.PDF_PRICE_RUB, status: "GENERATING" },
+    data: {
+      telegramId,
+      attempt: await currentAttempt(telegramId),
+      product: "PDF",
+      priceRub: env.PDF_PRICE_RUB,
+      status: "GENERATING",
+    },
   });
 }
 
@@ -1618,7 +1984,17 @@ type OfferEventName =
   | "quiz_q1"
   | "quiz_completed"
   | "guide_sent"
-  | "csat_asked";
+  | "csat_asked"
+  // Меню. В отличие от шагов онбординга пишутся каждый раз: в /stats
+  // важно, сколько раз меню открывали, а не сколько людей его видели.
+  | "menu_opened"
+  | "menu_support"
+  | "menu_docs"
+  | "menu_team"
+  | "restart_asked"
+  | "restart_confirmed"
+  | "restart_confirmed_cancelled_draft"
+  | "restart_cancelled";
 
 async function logOfferEvent(telegramId: bigint, type: OfferEventName) {
   await prisma.offerEvent
@@ -1642,8 +2018,10 @@ export async function runPdfGeneration(api: Api, orderId: number, reviewerCommen
   if (!order) return console.error(`Заказ #${orderId} не найден, генерация отменена.`);
 
   try {
+    // Разбор берём того прохождения, из которого заказ и пришёл:
+    // человек заплатил за то, что прочитал.
     const recommendation = await prisma.recommendation.findUnique({
-      where: { telegramId: order.telegramId },
+      where: { telegramId_attempt: { telegramId: order.telegramId, attempt: order.attempt } },
     });
     if (!recommendation?.analysis || !recommendation.message1 || !recommendation.message2) {
       throw new Error("Нет сохранённого бесплатного разбора: не из чего собирать план.");
@@ -1782,21 +2160,13 @@ export async function approveAndSendPdf(api: Api, orderId: number): Promise<void
   await schedulePdfFeedback(orderId, order.telegramId);
 }
 
-// ── Напоминания по заявкам на консультацию ──────────────────────────
+// ── Напоминания ─────────────────────────────────────────────────────
 //
-// Напоминания о зависших заказах PDF убраны 15.10.2026: их настроят
-// отдельно и по-другому. Проверка заявок осталась — она про то, что
-// родитель ждёт ответа специалиста, а не про сроки по заказу.
-
-const REMINDER_INTERVAL_MS = 30 * 60 * 1000;
-
-export function startReminders(api: Api) {
-  setInterval(() => {
-    void remindAboutStuckConsults(api).catch((error) =>
-      console.error("Не удалось проверить заявки на консультацию:", error)
-    );
-  }, REMINDER_INTERVAL_MS);
-}
+// Их больше нет совсем. Напоминания о зависших заказах PDF убраны
+// 15.10.2026, напоминания по заявкам на консультацию — 19.10.2026;
+// вместе с последними ушёл и сам цикл, запускавший эти проверки.
+// Оставшиеся два планировщика (апселл и отложенные вопросы) живут в
+// upsell.ts и feedback.ts и шлют сообщения родителям, а не нам.
 
 // ── CSAT ─────────────────────────────────────────────────────────────
 
@@ -1850,7 +2220,7 @@ async function markSentAndShowOffer(api: Api, telegramId: bigint, chatId: bigint
   if (!(await allowedToSend(telegramId, "SERVICE", "offer_after_analysis"))) return;
 
   await prisma.recommendation.update({
-    where: { telegramId },
+    where: { telegramId_attempt: { telegramId, attempt: await currentAttempt(telegramId) } },
     data: { status: "sent", sentAt: new Date() },
   });
 
@@ -1877,7 +2247,7 @@ export async function deliverRecommendation(
   await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading2, messages[1]), true);
 
   await prisma.recommendation.update({
-    where: { telegramId },
+    where: { telegramId_attempt: { telegramId, attempt: await currentAttempt(telegramId) } },
     data: { message1: messages[0], message2: messages[1] },
   });
 
@@ -1887,7 +2257,21 @@ export async function deliverRecommendation(
 // Автоматический путь (/approve): отправляем пользователю тот черновик,
 // который бот подготовил сам и показал тебе на проверку.
 export async function sendApprovedRecommendation(api: Api, telegramId: bigint, chatId: bigint) {
-  const recommendation = await prisma.recommendation.findUnique({ where: { telegramId } });
+  const recommendation = await currentRecommendation(telegramId);
+
+  // Человек начал анкету заново, пока черновик ждал проверки.
+  // Отправлять его нельзя: он про ответы, которые человек уже
+  // переписал. Проверяем до «черновика нет»: сразу после перезапуска
+  // текущего разбора не существует, и сообщение про отсутствие
+  // черновика сбивало бы с толку.
+  if (!recommendation || recommendation.status === "cancelled") {
+    if (recommendation?.status === "cancelled" || (await lastCancelledRecommendation(telegramId))) {
+      throw new Error(
+        "Этот разбор отменён: человек начал анкету заново. Новый придёт на проверку сам."
+      );
+    }
+  }
+
   if (!recommendation?.message1 || !recommendation?.message2) {
     throw new Error("Черновик разбора не найден.");
   }

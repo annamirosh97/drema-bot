@@ -98,8 +98,14 @@ export async function buildSupportCard(who: CardIdentity): Promise<string> {
 
   const [age, recommendation, analysisFeedback, order, consult, consents, thread] =
     await Promise.all([
-      prisma.answer.findFirst({ where: { telegramId, questionNumber: 1 } }),
-      prisma.recommendation.findUnique({ where: { telegramId } }),
+      // Текущее прохождение анкеты: в карточке важно то, что у человека
+      // сейчас. Номер уже есть в сессии, второй запрос за ним не нужен.
+      prisma.answer.findFirst({
+        where: { telegramId, attempt: session.attempt, questionNumber: 1 },
+      }),
+      prisma.recommendation.findUnique({
+        where: { telegramId_attempt: { telegramId, attempt: session.attempt } },
+      }),
       prisma.analysisFeedback.findUnique({ where: { telegramId } }),
       prisma.order.findFirst({ where: { telegramId }, orderBy: { createdAt: "desc" } }),
       prisma.consultRequest.findFirst({ where: { telegramId }, orderBy: { createdAt: "desc" } }),
@@ -119,11 +125,19 @@ export async function buildSupportCard(who: CardIdentity): Promise<string> {
     session.status === "completed"
       ? `пройдена ${shortDate(session.updatedAt)}`
       : "не пройдена";
+  // Отменённый разбор показываем отдельно: поддержке важно понимать,
+  // почему человек ничего не получил, если он об этом спросит.
   const analysisSent =
     recommendation?.status === "sent"
       ? `отправлен ${shortDate(recommendation.sentAt)}`
-      : "нет";
+      : recommendation?.status === "cancelled"
+        ? `отменён: ${escapeHtml(recommendation.cancelReason ?? "без причины")}`
+        : "нет";
   lines.push(`📋 Анкета: ${quiz}; разбор: ${analysisSent}`);
+
+  // Прохождение анкеты упоминаем только со второго: у подавляющего
+  // большинства оно первое, и строка «прохождение 1» была бы шумом.
+  if (session.attempt > 1) lines.push(`🔄 Проходил анкету заново, прохождение ${session.attempt}`);
 
   const hypothesis = mainHypothesis(recommendation?.analysis ?? null);
   if (hypothesis) lines.push(`🔎 Главная гипотеза: ${escapeHtml(hypothesis)}`);

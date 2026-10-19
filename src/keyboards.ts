@@ -43,6 +43,51 @@ export function welcomeValueKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("Начать", "start").row().text("Как я работаю", "how_it_works");
 }
 
+// ── Меню (/menu) ────────────────────────────────────────────────────
+
+// Кнопки по одной в строке: подписи длинные, и в два столбца Telegram
+// обрезал бы их на узком экране.
+export function menuKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("🔄 Начать заново", "menu_restart")
+    .row()
+    .text("💬 Поддержка", "menu_support")
+    .row()
+    .text("📄 Документы", "menu_docs")
+    .row()
+    .text("🌙 Команда Дрёмы", "menu_team");
+}
+
+export const RESTART_YES = "Да, начать заново";
+export const RESTART_NO = "Нет, вернуться";
+
+export function restartConfirmKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(RESTART_YES, "restart_yes")
+    .row()
+    .text(RESTART_NO, "restart_no");
+}
+
+// Возврат к прерванному шагу. Появляется только у тех, от кого бот
+// чего-то ждёт: человеку, который всё прошёл, возвращаться некуда.
+export function backToQuizKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("↩️ Вернуться к анкете", "menu_back");
+}
+
+// Кнопка-ссылка в бот поддержки. Параметр src_menu доезжает до карточки
+// обращения: по нему видно, что человек пришёл из меню.
+//
+// Возврат к анкете кладём в ту же клавиатуру, а не отдельным
+// сообщением: двух клавиатур на одном сообщении Telegram не покажет, а
+// лишнее сообщение ради одной кнопки — шум.
+export function supportLinkKeyboard(botUsername: string, withBack = false): InlineKeyboard {
+  const keyboard = new InlineKeyboard().url(
+    "💬 Написать в поддержку",
+    `https://t.me/${botUsername}?start=src_menu`
+  );
+  return withBack ? keyboard.row().text("↩️ Вернуться к анкете", "menu_back") : keyboard;
+}
+
 // ── Управление согласиями (/data) ───────────────────────────────────
 //
 // Подписи кнопок уходят в журнал как есть, поэтому живут константами.

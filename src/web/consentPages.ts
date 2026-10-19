@@ -110,6 +110,16 @@ export interface ConsentCardData {
   firstName: string | null;
   current: { type: string; action: string | null; at: Date | null; version: string | null }[];
   history: ConsentRecordRow[];
+  // Прохождения анкеты и судьба разбора по каждому. Показываем только
+  // когда их больше одного: у подавляющего большинства прохождение
+  // одно, и таблица из одной строки ничего не добавляет.
+  attempts?: {
+    attempt: number;
+    status: string;
+    cancelReason: string | null;
+    sentAt: Date | null;
+    createdAt: Date;
+  }[];
   // Обращение в поддержку, если человек писал. Ссылка нужна рядом с
   // согласиями: это одно и то же место, куда идут за историей.
   supportThreadId?: number | null;
@@ -159,6 +169,43 @@ function analysisFeedbackCard(data: ConsentCardData): string {
   return html`<div class="card">
     <h2>Узнали в разборе своего малыша?</h2>
     ${raw(body)}
+  </div>`;
+}
+
+const RECOMMENDATION_STATUS: Record<string, string> = {
+  pending: "готовится",
+  sent: "отправлен",
+  cancelled: "отменён",
+};
+
+// Прохождения анкеты. Нужны ровно в одном случае: человек начал
+// заново, его прошлый разбор не пришёл, и он спрашивает почему.
+function attemptsCard(data: ConsentCardData): string {
+  const attempts = data.attempts ?? [];
+  if (attempts.length < 2) return "";
+
+  const rows = attempts.map(
+    (a) => html`<tr>
+      <td>${a.attempt}</td>
+      <td>${formatMoscow(a.createdAt)}</td>
+      <td>
+        ${RECOMMENDATION_STATUS[a.status] ?? a.status}
+        ${a.status === "sent" && a.sentAt ? ` ${formatMoscow(a.sentAt)}` : ""}
+        ${a.status === "cancelled" ? `: ${a.cancelReason ?? "без причины"}` : ""}
+      </td>
+    </tr>`
+  );
+
+  return html`<div class="card">
+    <h2>Прохождения анкеты</h2>
+    <p class="muted">
+      Человек начинал анкету заново. Ответы каждого прохождения остались в
+      базе; в разбор идут только ответы последнего.
+    </p>
+    <table>
+      <tr><th>Прохождение</th><th>Анкета завершена</th><th>Разбор</th></tr>
+      ${raw(rows.join(""))}
+    </table>
   </div>`;
 }
 
@@ -243,6 +290,8 @@ export function renderConsentCard(data: ConsentCardData): string {
         </p>`;
 
   const body = html`${raw(header)}
+
+    ${raw(attemptsCard(data))}
 
     ${raw(analysisFeedbackCard(data))}
 

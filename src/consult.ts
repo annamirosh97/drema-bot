@@ -17,6 +17,7 @@ import { env } from "./env";
 import { formatPrice, texts } from "./texts";
 import { ConsentInput, recordConsent } from "./consents";
 import { buildPrepText } from "./prep";
+import { currentAttempt } from "./attempt";
 import { CONSULT_SELF_WRITE_BUTTON, consultConsentKeyboard } from "./keyboards";
 import { escapeHtml, replyStatic } from "./send";
 
@@ -108,6 +109,7 @@ export async function createConsultRequest(
   const request = await prisma.consultRequest.create({
     data: {
       telegramId,
+      attempt: await currentAttempt(telegramId),
       priceRub: origin.priceRub ?? env.CONSULT_PRICE_RUB,
       source: origin.source ?? "OFFER",
       orderId: origin.orderId ?? null,
@@ -325,8 +327,10 @@ function parentLine(request: ConsultRequest): string {
   return parts.join(", ");
 }
 
-async function babyAge(telegramId: bigint): Promise<string> {
-  const answer = await prisma.answer.findFirst({ where: { telegramId, questionNumber: 1 } });
+async function babyAge(telegramId: bigint, attempt: number): Promise<string> {
+  const answer = await prisma.answer.findFirst({
+    where: { telegramId, attempt, questionNumber: 1 },
+  });
   return answer?.answerText ?? "не указан";
 }
 
@@ -345,7 +349,7 @@ async function buildSummary(request: ConsultRequest): Promise<string> {
     `🗓 Новая заявка на консультацию #${request.id}\n` +
     `Родитель: ${parentLine(request)}\n` +
     `Кто пишет первым: ${firstContactLabel(request)}\n` +
-    `Возраст малыша: ${await babyAge(request.telegramId)}` +
+    `Возраст малыша: ${await babyAge(request.telegramId, request.attempt)}` +
     discountLines(request)
   );
 }
@@ -353,8 +357,13 @@ async function buildSummary(request: ConsultRequest): Promise<string> {
 // Полный пакет текстом: с ним специалист начинает работу, не задавая
 // родителю вопросов, на которые тот уже ответил в анкете.
 export async function buildConsultPackage(request: ConsultRequest): Promise<string> {
+  // Разбор и анкету берём того прохождения, по которому записались:
+  // специалист должен увидеть то же, что видел родитель, даже если тот
+  // успел начать анкету заново.
   const recommendation = await prisma.recommendation.findUnique({
-    where: { telegramId: request.telegramId },
+    where: {
+      telegramId_attempt: { telegramId: request.telegramId, attempt: request.attempt },
+    },
   });
 
   const header = [
@@ -364,7 +373,7 @@ export async function buildConsultPackage(request: ConsultRequest): Promise<stri
     `Телефон: ${request.parentPhone ?? "не передан"}`,
     `Telegram ID: ${request.telegramId}`,
     `Кто пишет первым: ${firstContactLabel(request)}`,
-    `Возраст малыша: ${await babyAge(request.telegramId)}`,
+    `Возраст малыша: ${await babyAge(request.telegramId, request.attempt)}`,
     ...(request.source === "AFTER_PDF"
       ? [`Источник: после покупки PDF`, `Цена: ${formatPrice(request.priceRub)} ₽ (скидка)`]
       : []),
@@ -375,7 +384,7 @@ export async function buildConsultPackage(request: ConsultRequest): Promise<stri
 
   return (
     header +
-    block("ОТВЕТЫ АНКЕТЫ", await buildPrepText(request.telegramId)) +
+    block("ОТВЕТЫ АНКЕТЫ", await buildPrepText(request.telegramId, request.attempt)) +
     block("СООБЩЕНИЕ 1, ОТПРАВЛЕННОЕ РОДИТЕЛЮ", recommendation?.message1) +
     block("СООБЩЕНИЕ 2, ОТПРАВЛЕННОЕ РОДИТЕЛЮ", recommendation?.message2) +
     block("ВЫВОДЫ АНАЛИЗА", recommendation?.analysis) +
@@ -518,72 +527,8 @@ export async function handleConsultStatusCallback(ctx: Context) {
 }
 
 // ── Напоминания ─────────────────────────────────────────────────────
-
-const CONSENT_OVERDUE_HOURS = 24;
-const CONTACT_OVERDUE_HOURS = 20;
-const REMINDER_COOLDOWN_MS = 3 * 60 * 60 * 1000;
-
-// Когда последний раз напоминали, по видам напоминаний. В памяти
-// процесса: после перезапуска напомним заново, и это не беда.
-const lastReminded = new Map<string, number>();
-
-function dueForReminder(key: string): boolean {
-  return Date.now() - (lastReminded.get(key) ?? 0) >= REMINDER_COOLDOWN_MS;
-}
-
-// Зовётся из общего цикла напоминаний в engine.ts.
-export async function remindAboutStuckConsults(api: Api) {
-  const now = Date.now();
-
-  // Родитель записался, но так и не решил, передавать ли контакт.
-  const undecided = await prisma.consultRequest.findMany({
-    where: {
-      firstContact: "PENDING",
-      status: { in: [...OPEN_STATUSES] },
-      createdAt: { lt: new Date(now - CONSENT_OVERDUE_HOURS * 3_600_000) },
-    },
-    orderBy: { createdAt: "asc" },
-  });
-
-  for (const request of undecided) {
-    const key = `consent:${request.id}`;
-    if (!dueForReminder(key)) continue;
-    await api
-      .sendMessage(adminChatId(), `Заявка #${request.id}: родитель не подтвердил контакт.`)
-      .then(() => lastReminded.set(key, Date.now()))
-      .catch((error) => console.error(`Не удалось напомнить о заявке #${request.id}:`, error));
-  }
-
-  // Заявка передана, но специалист ещё не отметил, что связалась.
-  // Заявки без выбора родителя сюда не попадают: связываться по ним
-  // пока не с чем, про них напоминает проверка выше.
-  const waiting = await prisma.consultRequest.findMany({
-    where: {
-      status: "NEW",
-      firstContact: { not: "PENDING" },
-      createdAt: { lt: new Date(now - CONTACT_OVERDUE_HOURS * 3_600_000) },
-    },
-    orderBy: { createdAt: "asc" },
-  });
-
-  for (const request of waiting) {
-    const key = `contact:${request.id}`;
-    if (!dueForReminder(key)) continue;
-
-    const text = `⏰ Заявка на консультацию #${request.id} ждёт контакта больше ${CONTACT_OVERDUE_HOURS} часов.`;
-    const recipients = [adminChatId(), specialistChatId()].filter(
-      (id): id is number => id !== null
-    );
-
-    let delivered = false;
-    for (const chatId of recipients) {
-      await api
-        .sendMessage(chatId, text)
-        .then(() => {
-          delivered = true;
-        })
-        .catch((error) => console.error(`Не удалось напомнить о заявке #${request.id}:`, error));
-    }
-    if (delivered) lastReminded.set(key, Date.now());
-  }
-}
+//
+// Напоминаний по заявкам больше нет: убраны 19.10.2026 по просьбе
+// команды. Висящие заявки видны в админке на /admin/consults, а о новой
+// заявке специалист и админ-чат по-прежнему узнают сразу — разовым
+// сообщением при её создании, не напоминанием.

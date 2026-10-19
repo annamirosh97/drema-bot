@@ -80,7 +80,7 @@ async function loadOrder(id: number) {
   if (!order?.draft) return null;
 
   const recommendation = await prisma.recommendation.findUnique({
-    where: { telegramId: order.telegramId },
+    where: { telegramId_attempt: { telegramId: order.telegramId, attempt: order.attempt } },
   });
 
   return { order, draft: order.draft, recommendation };
@@ -198,7 +198,8 @@ async function loadConsentCard(rawId: string): Promise<ConsentCardData | null> {
     return null;
   }
 
-  const [session, request, records, documents, support, analysisFeedback] = await Promise.all([
+  const [session, request, records, documents, support, analysisFeedback, recommendations] =
+    await Promise.all([
     prisma.session.findUnique({ where: { telegramId } }),
     prisma.consultRequest.findFirst({
       where: { telegramId, parentUsername: { not: null } },
@@ -208,6 +209,9 @@ async function loadConsentCard(rawId: string): Promise<ConsentCardData | null> {
     prisma.legalDocument.findMany(),
     prisma.supportThread.findUnique({ where: { telegramId } }),
     prisma.analysisFeedback.findUnique({ where: { telegramId } }),
+    // Все прохождения анкеты: по ним видно, начинал ли человек заново
+    // и чем кончился каждый разбор.
+    prisma.recommendation.findMany({ where: { telegramId }, orderBy: { attempt: "asc" } }),
   ]);
 
   // Карточку показываем и тому, у кого сессии уже нет: журнал её
@@ -222,6 +226,13 @@ async function loadConsentCard(rawId: string): Promise<ConsentCardData | null> {
     username: request?.parentUsername ?? null,
     firstName: session?.firstName ?? null,
     supportThreadId: support?.id ?? null,
+    attempts: recommendations.map((r) => ({
+      attempt: r.attempt,
+      status: r.status,
+      cancelReason: r.cancelReason,
+      sentAt: r.sentAt,
+      createdAt: r.createdAt,
+    })),
     analysisFeedback: analysisFeedback
       ? {
           rating: analysisFeedback.rating,
@@ -737,8 +748,14 @@ export function startAdminServer(api: Api) {
     if (!request) return res.status(404).send("Заявка не найдена.");
 
     const [recommendation, ageAnswer] = await Promise.all([
-      prisma.recommendation.findUnique({ where: { telegramId: request.telegramId } }),
-      prisma.answer.findFirst({ where: { telegramId: request.telegramId, questionNumber: 1 } }),
+      prisma.recommendation.findUnique({
+        where: {
+          telegramId_attempt: { telegramId: request.telegramId, attempt: request.attempt },
+        },
+      }),
+      prisma.answer.findFirst({
+        where: { telegramId: request.telegramId, attempt: request.attempt, questionNumber: 1 },
+      }),
     ]);
 
     res.send(

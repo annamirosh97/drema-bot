@@ -53,6 +53,10 @@ enum SessionStatus {
 enum RecommendationStatus {
   pending
   sent
+  // Человек начал анкету заново, пока разбор ждал проверки. Разбор
+  // остаётся в базе — он уже стоил денег и нужен для разбора спорных
+  // случаев, — но не отправляется и не считается ожидающим.
+  cancelled
 }
 
 model Session {
@@ -68,13 +72,20 @@ model Session {
   // показываются посреди сценария, и после ответа нужно вернуть их туда,
   // где они были.
   resumeStage         Stage?
+  // Номер текущего прохождения анкеты. Растёт на единицу каждый раз,
+  // когда человек начинает заново (/restart). Ответы и разборы прошлых
+  // прохождений остаются в базе, но в новый разбор не попадают: читаем
+  // только строки с этим номером (см. currentAttempt в engine.ts).
+  attempt             Int           @default(1)
   tempSelections      String[]      @default([]) // текущие выбранные варианты multi_choice (до "Готово")
   yellowFlags         String[]      @default([]) // накопленные жёлтые флаги для ручной проверки
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
 
   answers         Answer[]
-  recommendation  Recommendation?
+  // Разборов у человека столько, сколько прохождений анкеты: прошлые
+  // остаются в базе и после перезапуска.
+  recommendations Recommendation[]
   orders          Order[]
   offerEvents     OfferEvent[]
   consultRequests ConsultRequest[]
@@ -88,16 +99,24 @@ model Answer {
   telegramId     BigInt
   questionNumber Float // -3 = причина отказа, 30 = CSAT-оценка, 31 = CSAT-отзыв, 99 = доп. инфо после анкеты
   answerText     String
+  // Прохождение, к которому относится ответ. Ответы прошлых
+  // прохождений никуда не деваются, но в разбор идут только ответы
+  // текущего — см. Session.attempt.
+  attempt        Int      @default(1)
   createdAt      DateTime @default(now())
 
   session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
 
   @@index([telegramId])
+  @@index([telegramId, attempt])
 }
 
 model Recommendation {
   id         Int                  @id @default(autoincrement())
-  telegramId BigInt               @unique
+  // Уникален не сам telegramId, а пара с прохождением: разборы прошлых
+  // прохождений остаются в базе рядом с текущим.
+  telegramId BigInt
+  attempt    Int                  @default(1)
   message1   String?
   message2   String?
   // Блок ВЫВОДЫ из первого вызова: по нему второй вызов пишет текст.
@@ -107,9 +126,16 @@ model Recommendation {
   message4   String?
   status     RecommendationStatus @default(pending)
   sentAt     DateTime?
+  // Почему разбор отменён. Пока причина одна — человек начал заново, —
+  // но текст хранится строкой: в админке он показывается как есть.
+  cancelReason String?
+  cancelledAt  DateTime?
   createdAt  DateTime             @default(now())
 
   session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+
+  @@unique([telegramId, attempt])
+  @@index([telegramId])
 }
 
 // Каждое обращение к Claude API: токены, время и стоимость. Нужна, чтобы
@@ -154,6 +180,10 @@ enum OrderStatus {
 model Order {
   id         Int         @id @default(autoincrement())
   telegramId BigInt
+  // Прохождение, по разбору которого заказ куплен. Если человек потом
+  // начнёт анкету заново, план всё равно соберётся по тому разбору,
+  // который он читал, когда платил, — а не по новому.
+  attempt    Int         @default(1)
   product    Product     @default(PDF)
   priceRub   Int // цена, показанная этому пользователю на кнопке
   status     OrderStatus @default(GENERATING)
@@ -503,6 +533,19 @@ enum OfferEventType {
   pdf_feedback_answered
   pdf_feedback_comment
   pdf_feedback_comment_skipped
+  // Меню бота. В отличие от воронки онбординга эти события пишутся
+  // каждый раз, а не раз на человека: в /stats интересно, сколько раз
+  // меню открывали, а не сколько людей его хоть раз видели.
+  menu_opened
+  menu_support
+  menu_docs
+  menu_team
+  restart_asked
+  restart_confirmed
+  // Подтверждение с отменой ждавшего разбора. Отдельным событием, а не
+  // полем: п.8 ТЗ просит видеть, сколько перезапусков обнулили разбор.
+  restart_confirmed_cancelled_draft
+  restart_cancelled
 }
 
 model OfferEvent {
@@ -547,6 +590,10 @@ enum ConsultSource {
 model ConsultRequest {
   id               Int           @id @default(autoincrement())
   telegramId       BigInt
+  // Прохождение, по которому записались: пакет специалисту собирается
+  // из той анкеты и того разбора, что человек читал при записи, даже
+  // если он успел начать заново.
+  attempt          Int           @default(1)
   priceRub         Int // цена, показанная этому родителю на кнопке
   status           ConsultStatus @default(NEW)
   parentUsername   String? // без «@»; у аккаунта может не быть username

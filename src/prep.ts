@@ -7,6 +7,7 @@
 // импортирует consult.ts — получился бы круг.
 
 import { prisma } from "./prisma";
+import { currentAttempt } from "./attempt";
 import { QuestionDef, getQuestion } from "./questions";
 
 export function safeGetQuestion(number: number): QuestionDef | null {
@@ -17,8 +18,15 @@ export function safeGetQuestion(number: number): QuestionDef | null {
   }
 }
 
-export async function buildPrepText(telegramId: bigint): Promise<string> {
-  const rows = await prisma.answer.findMany({ where: { telegramId }, orderBy: { questionNumber: "asc" } });
+// По умолчанию собирает текущее прохождение анкеты. Номер передаётся
+// явно там, где нужно именно прошлое: в пакете заявки на консультацию и
+// в генерации плана по оплаченному заказу — родитель платил за ту
+// анкету, которую заполнил тогда.
+export async function buildPrepText(telegramId: bigint, attempt?: number): Promise<string> {
+  const rows = await prisma.answer.findMany({
+    where: { telegramId, attempt: attempt ?? (await currentAttempt(telegramId)) },
+    orderBy: { questionNumber: "asc" },
+  });
 
   const qaLines: string[] = [];
   const addenda: string[] = [];

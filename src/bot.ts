@@ -1,10 +1,14 @@
 import { Bot, Context } from "grammy";
 import { env } from "./env";
-import { handleIncoming, handleGotoCommand, handleResetCommand } from "./engine";
+import {
+  handleIncoming,
+  handleGotoCommand,
+  handleMenuCommand,
+  handleResetCommand,
+} from "./engine";
 import { handleConsultStatusCallback } from "./consult";
 import { registerAdminCommands, handleAdminFlowMessage } from "./admin";
 import { startAdminServer } from "./web/server";
-import { startReminders } from "./engine";
 import { startUpsellScheduler } from "./upsell";
 import { startFeedbackScheduler } from "./feedback";
 import { startSupportBot } from "./support/bot";
@@ -31,9 +35,23 @@ registerAdminCommands(bot);
 // показывала приветствие, даже у совсем нового пользователя.
 bot.command("start", (ctx) => handleIncoming(ctx));
 
-// /reset — вернуться в начало бота. Доступна всем: обычный
-// пользователь тоже может захотеть пройти анкету заново.
+// /reset — чистый лист с удалением ответов. Только для админа, проверка
+// внутри: людям для «начать заново» служит /restart, который ничего не
+// удаляет.
 bot.command("reset", (ctx) => handleResetCommand(ctx));
+
+// Меню и его пункты. Зарегистрированы как команды, а не как текст:
+// иначе «/menu», набранное посреди анкеты, уехало бы в ответ на вопрос.
+//
+// Все четыре идут через handleMenuCommand: он проверяет закрытый режим
+// и заводит сессию — ровно то же, с чего начинает handleIncoming.
+bot.command("menu", (ctx) => handleMenuCommand(ctx, "menu"));
+bot.command("support", (ctx) => handleMenuCommand(ctx, "support"));
+bot.command("docs", (ctx) => handleMenuCommand(ctx, "docs"));
+bot.command("team", (ctx) => handleMenuCommand(ctx, "team"));
+// «Начать заново» для людей. Имя не /regen: оно уже занято админской
+// командой перегенерации разбора (/regen <id> в admin.ts).
+bot.command("restart", (ctx) => handleMenuCommand(ctx, "restart"));
 
 // /data и /unsubscribe работают в любом состоянии, в том числе когда
 // согласие на обработку данных отозвано: иначе отзыв был бы дверью без
@@ -106,8 +124,6 @@ async function main() {
   // Веб-админка живёт в этом же процессе. Если ADMIN_PASSWORD не задан,
   // сервер всё равно поднимается, но админка отвечает 503 с объяснением.
   startAdminServer(bot.api);
-  // Напоминания по заявкам на консультацию, которые ждут контакта.
-  startReminders(bot.api);
   // Предложение консультации со скидкой через пару минут после плана.
   startUpsellScheduler(bot.api);
   // Отложенные вопросы: о разборе через сутки, о плане через неделю.
@@ -116,16 +132,32 @@ async function main() {
   // bot.start(): тот не возвращается, пока основной бот живёт. Без
   // токена поддержка просто не поднимается.
   startSupportBot();
-  // Меню команд в интерфейсе Telegram. Только для обычных людей:
-  // админские команды сюда не кладём, они и так известны.
+  // Список команд за кнопкой слева от поля ввода. Короткий намеренно:
+  // всё остальное лежит в самом меню, а длинный список людей пугает.
+  // /start, /restart, /support, /docs, /team и /unsubscribe работают,
+  // если набрать руками, но здесь не показываются.
+  //
+  // Задаём для личных чатов и отдельно для русского: Telegram выбирает
+  // список по языку клиента, и без общего (без language_code) человек с
+  // английским интерфейсом не увидел бы ничего.
+  const commands = [
+    { command: "menu", description: "Меню" },
+    { command: "data", description: "Мои данные и согласия" },
+  ];
+  for (const language_code of [undefined, "ru"] as const) {
+    await bot.api
+      .setMyCommands(commands, { scope: { type: "all_private_chats" }, language_code })
+      .catch((error) =>
+        console.error(`Не удалось задать меню команд (${language_code ?? "по умолчанию"}):`, error)
+      );
+  }
+
+  // Кнопка слева от поля ввода — стандартная кнопка команд. Telegram
+  // показывает её и по умолчанию, но задаём явно: у бота мог остаться
+  // другой тип кнопки, выставленный раньше через BotFather.
   await bot.api
-    .setMyCommands([
-      { command: "start", description: "Начать заново" },
-      { command: "data", description: "Мои согласия и данные" },
-      { command: "unsubscribe", description: "Отписаться от рассылки" },
-      { command: "reset", description: "Пройти анкету с чистого листа" },
-    ])
-    .catch((error) => console.error("Не удалось задать меню команд:", error));
+    .setChatMenuButton({ menu_button: { type: "commands" } })
+    .catch((error) => console.error("Не удалось задать кнопку меню:", error));
 
   await bot
     .start({

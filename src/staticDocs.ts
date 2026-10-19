@@ -12,7 +12,7 @@
 // явным, если кэш когда-нибудь переедет в базу.
 
 import { createHash } from "crypto";
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { Context, InputFile } from "grammy";
 import { PROJECT_ROOT } from "./prompts";
@@ -54,4 +54,36 @@ export async function sendCachedDocument(
   const sent = await ctx.replyWithDocument(new InputFile(path), options);
   const fileId = sent.document?.file_id;
   if (fileId) cache.set(path, { fileId, hash });
+}
+
+// То же для фотографии: фото команды в меню. Отдельная функция, а не
+// флаг у предыдущей, потому что Telegram возвращает фото не одним
+// file_id, а набором размеров, и брать из него нужно самый большой —
+// именно он соответствует загруженному файлу.
+//
+// Файла может не быть вовсе (фото команды в репозиторий ещё не
+// положили), поэтому сначала спрашиваем — наличие проверяет вызывающий.
+export async function sendCachedPhoto(ctx: Context, path: string): Promise<void> {
+  const hash = hashOf(path);
+  const cached = cache.get(path);
+
+  if (cached?.hash === hash) {
+    try {
+      await ctx.replyWithPhoto(cached.fileId);
+      return;
+    } catch (error) {
+      console.error(`Не удалось отправить ${path} по file_id, загружаю заново:`, error);
+      cache.delete(path);
+    }
+  }
+
+  const sent = await ctx.replyWithPhoto(new InputFile(path));
+  const largest = sent.photo?.[sent.photo.length - 1]?.file_id;
+  if (largest) cache.set(path, { fileId: largest, hash });
+}
+
+// Есть ли файл на диске. Нужно меню: фото команды необязательно, и его
+// отсутствие — не ошибка, а штатный случай.
+export function projectFileExists(relativePath: string): boolean {
+  return existsSync(projectFile(relativePath));
 }
