@@ -175,7 +175,7 @@ export function healthScreenKeyboard(): InlineKeyboard {
 // здесь нет и быть не должно: человеку только что сказали, что разбор
 // подготовить не получится.
 export function healthGuideKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("Прислать гид", "health_guide");
+  return new InlineKeyboard().text("Прислать гайд", "health_guide");
 }
 
 export const PD_CONSENT_YES = "Даю согласие";
@@ -306,7 +306,7 @@ export function offerConsultCardKeyboard(price: string): InlineKeyboard {
 
 export function upsellOfferKeyboard(price: string): InlineKeyboard {
   return new InlineKeyboard()
-    .text("Подробнее о консультации", "upsell_details")
+    .text("💬 Подробнее о консультации", "upsell_details")
     .row()
     .text(`Записаться за ${price} ₽`, "upsell_signup")
     .row()
