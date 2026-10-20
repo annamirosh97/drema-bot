@@ -166,6 +166,7 @@ export function crossLinks(current: string): string {
     ["/admin/consults", "консультации"],
     ["/admin/consent-log", "согласия"],
     ["/admin/support", "поддержка"],
+    ["/admin/log", "журнал"],
   ];
   return links
     .filter(([href]) => href !== current)

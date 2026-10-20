@@ -66,6 +66,8 @@ import {
   parseUsersQuery,
 } from "./usersData";
 import { TIMELINE_LABELS, TimelineKind } from "./timeline";
+import { loadLog, parseLogFilters } from "./logData";
+import { renderLogPage } from "./logPages";
 import { renderAnalysisEditor, renderQueuePage } from "./queuePages";
 import { analysisStatus, loadQueue, TASK_LABELS, TaskType } from "./queueData";
 import { waitedText } from "./usersData";
@@ -662,8 +664,10 @@ export function startAdminServer(api: Api) {
   }
 
   // Хостинг проверяет живость сервиса по корню — отвечаем без пароля.
+  // Корень отвечает живым текстом, а не редиректом: по нему проверяют,
+  // что процесс поднялся, в том числе снаружи без входа в админку.
   app.get("/", (_req, res) =>
-    res.send("Дрёма-бот жив. Админка — /admin/orders, /admin/consults, /admin/consents и /admin/support")
+    res.send("Дрёма-бот жив. Админка — /admin")
   );
 
   // ── Очередь «что горит» ───────────────────────────────────────────
@@ -988,6 +992,47 @@ export function startAdminServer(api: Api) {
           r.doneAt ? formatMoscow(r.doneAt, true) : "",
           r.payoutRub === null ? "" : String(r.payoutRub),
           r.payoutPaidAt ? formatMoscow(r.payoutPaidAt, true) : "",
+        ])
+      )
+    );
+  });
+
+  // ── Журнал действий админа ────────────────────────────────────────
+
+  app.get("/admin/log", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "created");
+    const filters = parseLogFilters(q);
+    const data = await loadLog(query, filters);
+    res.type("html").send(
+      renderLogPage({
+        chrome: chromeOf("/admin/log", query, { ...filters }, data),
+        rows: data.rows,
+        filters,
+        usedActions: data.usedActions,
+      })
+    );
+  });
+
+  app.get("/admin/log.csv", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "created");
+    const data = await loadLog(query, parseLogFilters(q));
+    sendCsv(
+      res,
+      "drema-admin-log.csv",
+      csvOf(
+        ["created_at_msk", "action", "telegram_id", "parent", "entity_type", "entity_id", "diff"],
+        data.all.map((r) => [
+          formatMoscow(r.createdAt, true),
+          r.action,
+          r.telegramId ?? "",
+          r.parent ?? "",
+          r.entityType,
+          r.entityId,
+          // Полный diff: выгрузка нужна как раз затем, чтобы разобрать
+          // спорный случай целиком, а не по сводке.
+          r.diff ? JSON.stringify(r.diff) : "",
         ])
       )
     );
