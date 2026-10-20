@@ -22,8 +22,8 @@ import {
 import { renderPdf } from "../pdf/render";
 import { PdfContent, ScheduleRow, ScheduleVariant } from "../paidPdf";
 import { RelaxationGroup, isRelaxationMemoReady, readRelaxationMemo } from "../prompts";
-import { OrderRow, renderOrderPage, renderOrdersPage, renderPreview } from "./pages";
-import { ConsultRow, renderConsultPage, renderConsultsPage } from "./consultPages";
+import { renderOrderPage, renderPreview } from "./pages";
+import { renderConsultPage } from "./consultPages";
 import { ConsultStatusChange, buildConsultPackage, setConsultStatus } from "../consult";
 import type { LegalDocType } from "@prisma/client";
 import { activeDocument, readLegalText } from "../legalDocs";
@@ -37,7 +37,7 @@ import {
   renderConsentSearchPage,
   renderMarketingPage,
 } from "./consentPages";
-import { getConsentState } from "../consents";
+import { formatMoscow, getConsentState } from "../consents";
 import {
   AnalysisFeedbackPageData,
   AnalysisFeedbackRow,
@@ -70,6 +70,33 @@ import { renderAnalysisEditor, renderQueuePage } from "./queuePages";
 import { analysisStatus, loadQueue, TASK_LABELS, TaskType } from "./queueData";
 import { waitedText } from "./usersData";
 import { currentRecommendation } from "../attempt";
+import {
+  buildParams,
+  csvOf,
+  dateRange,
+  parseTableQuery,
+  type ChromeData,
+} from "./tableChrome";
+import {
+  loadAnalyses,
+  loadAttempts,
+  loadConsentLog,
+  loadConsultsTable,
+  loadFunnel,
+  loadOrdersTable,
+  parseAnalysisFilters,
+  parseAttemptsFilters,
+  parseConsentFilters,
+  parseConsultFilters as parseConsultTableFilters,
+  parseOrderFilters,
+} from "./tablesData";
+import {
+  renderAnalysesPage,
+  renderAttemptsPage,
+  renderConsentLogPage,
+  renderConsultsTablePage,
+  renderOrdersTablePage,
+} from "./tablesPages";
 
 const TIMELINE_KINDS = Object.keys(TIMELINE_LABELS) as readonly TimelineKind[];
 
@@ -795,6 +822,177 @@ export function startAdminServer(api: Api) {
     res.redirect(`/admin/analysis/${telegramId}?regen=1`);
   });
 
+  // ── Таблицы: прохождения, согласия, разборы ───────────────────────
+  //
+  // Заказы и консультации живут ниже, рядом со своими карточками.
+
+  // Обвязка страницы: одна и та же для всех таблиц.
+  const chromeOf = (
+    base: string,
+    query: ReturnType<typeof parseTableQuery>,
+    filters: Record<string, string | boolean>,
+    data: { total: number; page: number; pages: number }
+  ): ChromeData => ({
+    base,
+    params: buildParams(query, filters),
+    query,
+    total: data.total,
+    page: data.page,
+    pages: data.pages,
+  });
+
+  const sendCsv = (res: Response, name: string, body: string) => {
+    res.type("text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
+    res.send(body);
+  };
+
+  app.get("/admin/attempts", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "started");
+    const filters = parseAttemptsFilters(q);
+    const [data, funnel] = await Promise.all([
+      loadAttempts(query, filters),
+      loadFunnel(dateRange(query)),
+    ]);
+    res.type("html").send(
+      renderAttemptsPage({
+        chrome: chromeOf("/admin/attempts", query, { ...filters }, data),
+        rows: data.rows,
+        funnel,
+        filters,
+        steps: data.steps,
+      })
+    );
+  });
+
+  app.get("/admin/attempts.csv", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "started");
+    const data = await loadAttempts(query, parseAttemptsFilters(q));
+    sendCsv(
+      res,
+      "drema-attempts.csv",
+      csvOf(
+        ["telegram_id", "parent", "attempt", "baby_age_months", "started_at_msk",
+         "completed_at_msk", "last_step", "status", "questionnaire_version"],
+        data.all.map((r) => [
+          r.telegramId, r.parent, String(r.attemptNumber), r.babyAge ?? "",
+          formatMoscow(r.startedAt, true), r.completedAt ? formatMoscow(r.completedAt, true) : "",
+          r.lastStep === null ? "" : String(r.lastStep), r.view, r.version,
+        ])
+      )
+    );
+  });
+
+  app.get("/admin/consent-log", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "created");
+    const filters = parseConsentFilters(q);
+    const data = await loadConsentLog(query, filters);
+    res.type("html").send(
+      renderConsentLogPage({
+        chrome: chromeOf("/admin/consent-log", query, { ...filters }, data),
+        rows: data.rows,
+        filters,
+        versions: data.versions,
+      })
+    );
+  });
+
+  app.get("/admin/consent-log.csv", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "created");
+    const data = await loadConsentLog(query, parseConsentFilters(q));
+    sendCsv(
+      res,
+      "drema-consents.csv",
+      csvOf(
+        ["telegram_id", "parent", "consent_type", "action", "document_version", "source", "created_at_msk"],
+        data.all.map((r) => [
+          r.telegramId, r.parent, r.type, r.action, r.version ?? "", r.source,
+          formatMoscow(r.createdAt, true),
+        ])
+      )
+    );
+  });
+
+  app.get("/admin/analyses", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "waiting");
+    const filters = parseAnalysisFilters(q);
+    const data = await loadAnalyses(query, filters, env.SLA_PROMISE_HOURS);
+    res.type("html").send(
+      renderAnalysesPage({
+        chrome: chromeOf("/admin/analyses", query, { ...filters }, data),
+        rows: data.rows,
+        filters,
+      })
+    );
+  });
+
+  app.get("/admin/analyses.csv", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "waiting");
+    const data = await loadAnalyses(query, parseAnalysisFilters(q), env.SLA_PROMISE_HOURS);
+    sendCsv(
+      res,
+      "drema-analyses.csv",
+      csvOf(
+        ["telegram_id", "parent", "attempt", "status", "waited", "overdue",
+         "sent_at_msk", "api_cost_usd", "rating"],
+        data.all.map((r) => [
+          r.telegramId, r.parent, String(r.attempt), r.status, r.waiting,
+          r.overdue ? "yes" : "no", r.sentAt ? formatMoscow(r.sentAt, true) : "",
+          r.costUsd === null ? "" : r.costUsd.toFixed(4), r.rating ?? "",
+        ])
+      )
+    );
+  });
+
+  app.get("/admin/orders.csv", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "created");
+    const data = await loadOrdersTable(query, parseOrderFilters(q));
+    sendCsv(
+      res,
+      "drema-orders.csv",
+      csvOf(
+        ["order_id", "telegram_id", "parent", "product", "price_rub", "pay_status",
+         "paid_at_msk", "pdf_status", "waited", "analysis_sent", "receipt_status", "receipt_url"],
+        data.all.map((r) => [
+          String(r.id), r.telegramId, r.parent, r.product, String(r.priceRub), r.payStatus,
+          r.paidAt ? formatMoscow(r.paidAt, true) : "", r.pdfStatus, r.waiting,
+          r.analysisSent ? "yes" : "no", r.receiptStatus, r.receiptUrl ?? "",
+        ])
+      )
+    );
+  });
+
+  app.get("/admin/consults.csv", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "created");
+    const data = await loadConsultsTable(query, parseConsultTableFilters(q));
+    sendCsv(
+      res,
+      "drema-consults.csv",
+      csvOf(
+        ["consult_id", "telegram_id", "parent", "status", "requested_at_msk", "paid_at_msk",
+         "contacted_at_msk", "diary_received", "completed_at_msk", "payout_rub", "payout_paid_at_msk"],
+        data.all.map((r) => [
+          String(r.id), r.telegramId, r.parent, r.status,
+          formatMoscow(r.createdAt, true),
+          r.paidAt ? formatMoscow(r.paidAt, true) : "",
+          r.contactedAt ? formatMoscow(r.contactedAt, true) : "",
+          r.diaryReceived ? "yes" : "no",
+          r.doneAt ? formatMoscow(r.doneAt, true) : "",
+          r.payoutRub === null ? "" : String(r.payoutRub),
+          r.payoutPaidAt ? formatMoscow(r.payoutPaidAt, true) : "",
+        ])
+      )
+    );
+  });
+
   // ── Пользователи ──────────────────────────────────────────────────
 
   app.get("/admin/users", async (req, res) => {
@@ -871,23 +1069,26 @@ export function startAdminServer(api: Api) {
     res.redirect(`/admin/users/${telegramId}`);
   });
 
-  app.get("/admin/orders", async (_req, res) => {
-    const orders = await prisma.order.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
-    const feedback = await prisma.pdfFeedback.findMany({
-      where: { orderId: { in: orders.map((o) => o.id) } },
-      select: { orderId: true, result: true },
-    });
-    const byOrder = new Map(feedback.map((f) => [f.orderId, f.result]));
-
-    const rows: OrderRow[] = orders.map((o) => ({
-      id: o.id,
-      telegramId: String(o.telegramId),
-      status: o.status,
-      createdAt: o.createdAt,
-      hoursWaiting: (Date.now() - o.createdAt.getTime()) / 3_600_000,
-      result: byOrder.get(o.id) ?? null,
-    }));
-    res.send(renderOrdersPage(rows));
+  app.get("/admin/orders", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "created");
+    const filters = parseOrderFilters(q);
+    const data = await loadOrdersTable(query, filters);
+    res.type("html").send(
+      renderOrdersTablePage({
+        chrome: {
+          base: "/admin/orders",
+          params: buildParams(query, { ...filters }),
+          query,
+          total: data.total,
+          page: data.page,
+          pages: data.pages,
+        },
+        rows: data.rows,
+        totals: data.totals,
+        filters,
+      })
+    );
   });
 
   app.get("/admin/orders/:id", async (req, res) => {
@@ -1021,22 +1222,25 @@ export function startAdminServer(api: Api) {
 
   // ── Заявки на консультацию ────────────────────────────────────────
 
-  app.get("/admin/consults", async (_req, res) => {
-    const requests = await prisma.consultRequest.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 100,
-    });
-    const rows: ConsultRow[] = requests.map((r) => ({
-      id: r.id,
-      createdAt: r.createdAt,
-      status: r.status,
-      parentUsername: r.parentUsername,
-      firstContact: r.firstContact,
-      source: r.source,
-      priceRub: r.priceRub,
-      hoursWaiting: (Date.now() - r.createdAt.getTime()) / 3_600_000,
-    }));
-    res.send(renderConsultsPage(rows));
+  app.get("/admin/consults", async (req, res) => {
+    const q = req.query as Record<string, unknown>;
+    const query = parseTableQuery(q, "created");
+    const filters = parseConsultTableFilters(q);
+    const data = await loadConsultsTable(query, filters);
+    res.type("html").send(
+      renderConsultsTablePage({
+        chrome: {
+          base: "/admin/consults",
+          params: buildParams(query, { ...filters }),
+          query,
+          total: data.total,
+          page: data.page,
+          pages: data.pages,
+        },
+        rows: data.rows,
+        filters,
+      })
+    );
   });
 
   app.get("/admin/consults/:id", async (req, res) => {

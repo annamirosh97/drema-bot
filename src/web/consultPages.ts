@@ -38,16 +38,6 @@ export function firstContactLabel(value: string): string {
   return FIRST_CONTACT_LABELS[value] ?? value;
 }
 
-export interface ConsultRow {
-  id: number;
-  createdAt: Date;
-  status: string;
-  parentUsername: string | null;
-  firstContact: string;
-  source: string;
-  priceRub: number;
-  hoursWaiting: number;
-}
 
 // Подсветка только у новых заявок: у завершённой «48 ч» ни о чём не
 // говорит, а у новой это пропущенные сутки.
@@ -56,37 +46,6 @@ function waitingPill(hours: number, status: string): string {
   return html`<span class="${cls}">${Math.round(hours)} ч</span>`;
 }
 
-export function renderConsultsPage(requests: ConsultRow[]): string {
-  const rows = requests.map(
-    (r) => html`<tr>
-      <td><a href="/admin/consults/${r.id}">#${r.id}</a></td>
-      <td>${r.createdAt.toLocaleString("ru-RU")}</td>
-      <td>${statusLabel(r.status)}</td>
-      <td>${r.parentUsername ? `@${r.parentUsername}` : "—"}</td>
-      <td>${firstContactLabel(r.firstContact)}</td>
-      <td>${sourceLabel(r.source)}</td>
-      <td>${r.priceRub} ₽</td>
-      <td>${raw(waitingPill(r.hoursWaiting, r.status))}</td>
-    </tr>`
-  );
-
-  const body = requests.length
-    ? html`<table>
-        <tr><th>Заявка</th><th>Создана</th><th>Статус</th><th>Родитель</th><th>Пишет первым</th><th>Источник</th><th>Цена</th><th>Ждёт</th></tr>
-        ${raw(rows.join(""))}
-      </table>`
-    : html`<p class="muted">Заявок пока нет.</p>`;
-
-  return page(
-    "Консультации",
-    html`<h1>Заявки на консультацию</h1>
-      <p class="muted">
-        Красным — новые заявки, которые ждут больше 20 часов ·
-        <a href="/admin/orders">к заказам PDF</a>
-      </p>
-      <div class="card">${raw(body)}</div>`
-  );
-}
 
 // ── Страница заявки ─────────────────────────────────────────────────
 

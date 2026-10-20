@@ -6,16 +6,6 @@ import { SCHEDULE_DISCLAIMER } from "../pdfTexts";
 import { PDF_LABELS } from "./feedbackPages";
 import { escape, html, page, raw } from "./html";
 
-export interface OrderRow {
-  id: number;
-  telegramId: string;
-  status: string;
-  createdAt: Date;
-  hoursWaiting: number;
-  // Что родитель ответил через неделю. null — ещё не спрашивали или
-  // не ответил.
-  result: string | null;
-}
 
 // Подсветка по времени ожидания: ТЗ просит отметить заказы старше 12
 // часов и отдельно — старше 20, чтобы не пропустить обещанные сутки.
@@ -27,37 +17,6 @@ function waitingPill(hours: number, status: string): string {
   return html`<span class="${cls}">${Math.round(hours)} ч</span>`;
 }
 
-export function renderOrdersPage(orders: OrderRow[]): string {
-  const rows = orders.map(
-    (o) => html`<tr>
-      <td><a href="/admin/orders/${o.id}">#${o.id}</a></td>
-      <td>${o.createdAt.toLocaleString("ru-RU")}</td>
-      <td>${o.status}</td>
-      <td>${raw(waitingPill(o.hoursWaiting, o.status))}</td>
-      <td>${o.result ? PDF_LABELS[o.result] ?? o.result : "—"}</td>
-      <td class="muted">#${o.telegramId}</td>
-    </tr>`
-  );
-
-  const body = orders.length
-    ? html`<table>
-        <tr><th>Заказ</th><th>Создан</th><th>Статус</th><th>Ждёт</th><th>Результат</th><th>Пользователь</th></tr>
-        ${raw(rows.join(""))}
-      </table>`
-    : html`<p class="muted">Заказов пока нет.</p>`;
-
-  return page(
-    "Заказы",
-    html`<h1>Заказы PDF</h1>
-      <p class="muted">
-        Жёлтым — ждут больше 12 часов, красным — больше 20 ·
-        <a href="/admin/consults">заявки на консультацию</a> ·
-        <a href="/admin/consents">согласия</a> ·
-        <a href="/admin/support">поддержка</a>
-      </p>
-      <div class="card">${raw(body)}</div>`
-  );
-}
 
 // ── Страница заказа ─────────────────────────────────────────────────
 
