@@ -12,7 +12,13 @@ import express, { NextFunction, Request, Response } from "express";
 import type { Api } from "grammy";
 import { prisma } from "../prisma";
 import { env } from "../env";
-import { approveAndSendPdf, buildPrepText, runPdfGeneration } from "../engine";
+import {
+  approveAndSendPdf,
+  buildPrepText,
+  generateDraftForAdmin,
+  runPdfGeneration,
+  sendApprovedRecommendation,
+} from "../engine";
 import { renderPdf } from "../pdf/render";
 import { PdfContent, ScheduleRow, ScheduleVariant } from "../paidPdf";
 import { RelaxationGroup, isRelaxationMemoReady, readRelaxationMemo } from "../prompts";
@@ -60,6 +66,10 @@ import {
   parseUsersQuery,
 } from "./usersData";
 import { TIMELINE_LABELS, TimelineKind } from "./timeline";
+import { renderAnalysisEditor, renderQueuePage } from "./queuePages";
+import { analysisStatus, loadQueue, TASK_LABELS, TaskType } from "./queueData";
+import { waitedText } from "./usersData";
+import { currentRecommendation } from "../attempt";
 
 const TIMELINE_KINDS = Object.keys(TIMELINE_LABELS) as readonly TimelineKind[];
 
@@ -629,6 +639,162 @@ export function startAdminServer(api: Api) {
     res.send("Дрёма-бот жив. Админка — /admin/orders, /admin/consults, /admin/consents и /admin/support")
   );
 
+  // ── Очередь «что горит» ───────────────────────────────────────────
+
+  app.get("/admin", (_req, res) => res.redirect("/admin/queue"));
+
+  app.get("/admin/queue", async (req, res) => {
+    const type = typeof req.query.type === "string" ? req.query.type : "";
+    const filter = (Object.keys(TASK_LABELS) as string[]).includes(type) ? (type as TaskType) : "";
+    res.type("html").send(renderQueuePage(await loadQueue(filter)));
+  });
+
+  // ── Бесплатный разбор: черновик и отправка ────────────────────────
+  //
+  // До этого правка и отправка бесплатного разбора жили только в
+  // командах бота (/draft, /send, /approve). В админке их не было
+  // вовсе, хотя очередь ведёт именно сюда.
+
+  async function loadAnalysis(telegramId: bigint) {
+    const rec = await currentRecommendation(telegramId);
+    if (!rec) return null;
+    const [session, age] = await Promise.all([
+      prisma.session.findUnique({ where: { telegramId } }),
+      prisma.answer.findFirst({
+        where: { telegramId, attempt: rec.attempt, questionNumber: 1 },
+      }),
+    ]);
+    return { rec, session, age: age?.answerText ?? null };
+  }
+
+  app.get("/admin/analysis/:telegramId", async (req, res) => {
+    let telegramId: bigint;
+    try {
+      telegramId = BigInt(req.params.telegramId);
+    } catch {
+      return res.status(404).send("Такого пользователя нет.");
+    }
+
+    const loaded = await loadAnalysis(telegramId);
+    if (!loaded?.rec) return res.status(404).send("Разбора для этого родителя нет.");
+    const { rec, session, age } = loaded;
+
+    const notices: Record<string, string> = {
+      saved: "Правки сохранены. Родителю пока ничего не ушло.",
+      sent: "Разбор отправлен родителю.",
+      regen: "Перегенерация запущена, черновик обновится через минуту-две.",
+    };
+    const noticeKey = Object.keys(notices).find((k) => req.query[k] === "1");
+
+    res.type("html").send(
+      renderAnalysisEditor({
+        telegramId: String(telegramId),
+        parentName: session?.firstName ?? "без имени",
+        attempt: rec.attempt,
+        status: analysisStatus(rec),
+        waiting: waitedText(rec.waitStartedAt ?? rec.createdAt, rec.sentAt),
+        createdAt: rec.createdAt,
+        sentAt: rec.sentAt,
+        babyAge: age,
+        aiMessage1: rec.aiMessage1,
+        aiMessage2: rec.aiMessage2,
+        message1: rec.message1 ?? "",
+        message2: rec.message2 ?? "",
+        analysis: rec.analysis,
+        deliveryError: rec.deliveryError,
+        edited:
+          (rec.aiMessage1 !== null && rec.aiMessage1 !== rec.message1) ||
+          (rec.aiMessage2 !== null && rec.aiMessage2 !== rec.message2),
+        notice: noticeKey ? notices[noticeKey] : null,
+        error: typeof req.query.error === "string" ? req.query.error : null,
+      })
+    );
+  });
+
+  app.post("/admin/analysis/:telegramId/save", async (req, res) => {
+    const telegramId = BigInt(req.params.telegramId);
+    const rec = await currentRecommendation(telegramId);
+    if (!rec) return res.status(404).send("Разбора нет.");
+    // Отправленный разбор не правим: родитель его уже прочитал.
+    if (rec.sentAt) return res.redirect(`/admin/analysis/${telegramId}?error=Разбор+уже+отправлен`);
+
+    const message1 = String(req.body.message1 ?? "").trim();
+    const message2 = String(req.body.message2 ?? "").trim();
+    // Запоминаем до обновления: полагаться на то, что объект из базы
+    // останется неизменным после update, не стоит.
+    const was = { message1: rec.message1, message2: rec.message2 };
+
+    await prisma.recommendation.update({
+      where: { id: rec.id },
+      data: { message1, message2 },
+    });
+    await logAdminAction(adminId(req), "analysis_draft_edited", "recommendation", String(rec.id), {
+      message1: { from: was.message1, to: message1 },
+      message2: { from: was.message2, to: message2 },
+    });
+
+    res.redirect(`/admin/analysis/${telegramId}?saved=1`);
+  });
+
+  app.post("/admin/analysis/:telegramId/approve", async (req, res) => {
+    const telegramId = BigInt(req.params.telegramId);
+    const session = await prisma.session.findUnique({ where: { telegramId } });
+    if (!session) return res.status(404).send("Такого пользователя нет.");
+
+    const rec = await currentRecommendation(telegramId);
+    try {
+      // Идемпотентность внутри sendApprovedRecommendation: повторный
+      // клик упрётся в «уже отправлен» и второго сообщения не будет.
+      await sendApprovedRecommendation(api, telegramId, session.chatId);
+      await logAdminAction(adminId(req), "analysis_sent", "recommendation", String(rec?.id ?? ""), {
+        result: "ok",
+      });
+      res.redirect(`/admin/analysis/${telegramId}?sent=1`);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await logAdminAction(adminId(req), "analysis_send_failed", "recommendation", String(rec?.id ?? ""), {
+        result: reason,
+      });
+      res.redirect(`/admin/analysis/${telegramId}?error=${encodeURIComponent(reason)}`);
+    }
+  });
+
+  // Повтор отправки — тот же путь, что утверждение: разбор не
+  // помечен отправленным, значит отправлять можно снова.
+  app.post("/admin/analysis/:telegramId/retry", async (req, res) => {
+    const telegramId = BigInt(req.params.telegramId);
+    const session = await prisma.session.findUnique({ where: { telegramId } });
+    if (!session) return res.status(404).send("Такого пользователя нет.");
+
+    const rec = await currentRecommendation(telegramId);
+    try {
+      await sendApprovedRecommendation(api, telegramId, session.chatId);
+      await logAdminAction(adminId(req), "analysis_resent", "recommendation", String(rec?.id ?? ""), {
+        result: "ok",
+      });
+      res.redirect(`/admin/analysis/${telegramId}?sent=1`);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await logAdminAction(adminId(req), "analysis_resend_failed", "recommendation", String(rec?.id ?? ""), {
+        result: reason,
+      });
+      res.redirect(`/admin/analysis/${telegramId}?error=${encodeURIComponent(reason)}`);
+    }
+  });
+
+  app.post("/admin/analysis/:telegramId/regenerate", async (req, res) => {
+    const telegramId = BigInt(req.params.telegramId);
+    const rec = await currentRecommendation(telegramId);
+    if (!rec) return res.status(404).send("Разбора нет.");
+    if (rec.sentAt) return res.redirect(`/admin/analysis/${telegramId}?error=Разбор+уже+отправлен`);
+
+    await logAdminAction(adminId(req), "analysis_regenerated", "recommendation", String(rec.id));
+    // Результата не ждём: два обращения к модели идут десятки секунд, и
+    // запрос успел бы отвалиться по таймауту.
+    void generateDraftForAdmin(api, telegramId);
+    res.redirect(`/admin/analysis/${telegramId}?regen=1`);
+  });
+
   // ── Пользователи ──────────────────────────────────────────────────
 
   app.get("/admin/users", async (req, res) => {
@@ -789,6 +955,12 @@ export function startAdminServer(api: Api) {
       where: { orderId: id },
       data: { editedContent: edited as object },
     });
+    // В журнал идут обе версии: по ТЗ от правки черновика нужен diff.
+    await logAdminAction(adminId(req), "pdf_draft_edited", "order", String(id), {
+      recommendations: { from: previous.recommendations, to: edited.recommendations },
+      scheduleIntro: { from: previous.schedule.intro, to: edited.schedule.intro },
+      scheduleNote: { from: previous.schedule.note, to: edited.schedule.note },
+    });
     res.redirect(`/admin/orders/${id}?saved=1`);
   });
 
@@ -820,10 +992,15 @@ export function startAdminServer(api: Api) {
     const id = Number(req.params.id);
     try {
       await approveAndSendPdf(api, id);
+      await logAdminAction(adminId(req), "pdf_sent", "order", String(id), { result: "ok" });
       res.redirect(`/admin/orders/${id}?sent=1`);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       console.error(`Не удалось отправить план по заказу #${id}:`, error);
+      await prisma.order
+        .update({ where: { id }, data: { deliveryError: reason.slice(0, 500) } })
+        .catch(() => {});
+      await logAdminAction(adminId(req), "pdf_send_failed", "order", String(id), { result: reason });
       res.redirect(`/admin/orders/${id}?error=${encodeURIComponent(reason)}`);
     }
   });
@@ -835,6 +1012,7 @@ export function startAdminServer(api: Api) {
 
     const comment = String(req.body.comment ?? "").trim() || undefined;
 
+    await logAdminAction(adminId(req), "pdf_regenerated", "order", String(id), { comment });
     // Результата не ждём: два обращения к модели идут минуты, и запрос
     // за это время успел бы отвалиться по таймауту.
     void runPdfGeneration(api, id, comment);
@@ -888,6 +1066,9 @@ export function startAdminServer(api: Api) {
         firstContact: request.firstContact,
         contactedAt: request.contactedAt,
         doneAt: request.doneAt,
+        diaryReceived: request.diaryReceived,
+        payoutRub: request.consultantPayoutRub,
+        payoutPaidAt: request.payoutPaidAt,
         priceRub: request.priceRub,
         source: request.source,
         orderId: request.orderId,
@@ -920,8 +1101,116 @@ export function startAdminServer(api: Api) {
       return res.status(400).send("Неизвестный статус.");
     }
 
+    const before = await prisma.consultRequest.findUnique({
+      where: { id },
+      select: { status: true },
+    });
     await setConsultStatus(id, status as ConsultStatusChange);
+    await logAdminAction(adminId(req), "consult_status_changed", "consult", String(id), {
+      status: { from: before?.status ?? null, to: status },
+    });
     res.redirect(`/admin/consults/${id}?status=1`);
+  });
+
+  // Повтор отправки плана. approveAndSendPdf сам откажется, если
+  // заказ уже отправлен, — двойной клик второго файла не пришлёт.
+  app.post("/admin/orders/:id/retry", async (req, res) => {
+    const id = Number(req.params.id);
+    try {
+      await approveAndSendPdf(api, id);
+      await prisma.order.update({ where: { id }, data: { deliveryError: null } });
+      await logAdminAction(adminId(req), "pdf_resent", "order", String(id), { result: "ok" });
+      res.redirect(`/admin/orders/${id}?sent=1`);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await prisma.order
+        .update({ where: { id }, data: { deliveryError: reason.slice(0, 500) } })
+        .catch(() => {});
+      await logAdminAction(adminId(req), "pdf_resend_failed", "order", String(id), { result: reason });
+      res.redirect(`/admin/orders/${id}?error=${encodeURIComponent(reason)}`);
+    }
+  });
+
+  // Чек выбит. Ссылку можно не указывать: чек бывает и без адреса.
+  app.post("/admin/orders/:id/receipt", async (req, res) => {
+    const id = Number(req.params.id);
+    const url = String(req.body.url ?? "").trim() || null;
+    await prisma.order.update({
+      where: { id },
+      data: { receiptStatus: "ISSUED", receiptUrl: url },
+    });
+    await logAdminAction(adminId(req), "receipt_issued", "order", String(id), { url });
+    res.redirect(req.body.back ? String(req.body.back) : "/admin/queue");
+  });
+
+  // Заказ оплачен — ручная отметка, пока оплата не подключена.
+  app.post("/admin/orders/:id/paid", async (req, res) => {
+    const id = Number(req.params.id);
+    const before = await prisma.order.findUnique({ where: { id }, select: { status: true, paidAt: true } });
+    if (!before) return res.status(404).send("Заказ не найден.");
+    // Повторная отметка не сдвигает дату оплаты.
+    if (before.paidAt) return res.redirect(`/admin/orders/${id}`);
+
+    await prisma.order.update({
+      where: { id },
+      data: { paidAt: new Date(), status: "PAID", receiptStatus: "PENDING" },
+    });
+    await logAdminAction(adminId(req), "order_marked_paid", "order", String(id), {
+      status: { from: before.status, to: "PAID" },
+    });
+    res.redirect(`/admin/orders/${id}`);
+  });
+
+  // ── Отметки по консультации ───────────────────────────────────────
+
+  app.post("/admin/consults/:id/contacted", async (req, res) => {
+    const id = Number(req.params.id);
+    const before = await prisma.consultRequest.findUnique({
+      where: { id },
+      select: { status: true, contactedAt: true },
+    });
+    if (!before) return res.status(404).send("Заявка не найдена.");
+    if (!before.contactedAt) {
+      await setConsultStatus(id, "CONTACTED");
+      await logAdminAction(adminId(req), "consult_contacted", "consult", String(id), {
+        status: { from: before.status, to: "CONTACTED" },
+      });
+    }
+    res.redirect(req.body.back ? String(req.body.back) : "/admin/queue");
+  });
+
+  app.post("/admin/consults/:id/diary", async (req, res) => {
+    const id = Number(req.params.id);
+    await prisma.consultRequest.update({ where: { id }, data: { diaryReceived: true } });
+    await logAdminAction(adminId(req), "consult_diary_received", "consult", String(id));
+    res.redirect(req.body.back ? String(req.body.back) : `/admin/consults/${id}`);
+  });
+
+  // Выплата Софии. Сумма вводится руками: процент пока не решён, и
+  // считать автоматически нечего (открытый вопрос самого ТЗ).
+  app.post("/admin/consults/:id/payout", async (req, res) => {
+    const id = Number(req.params.id);
+    const rub = parseInt(String(req.body.rub ?? ""), 10);
+    if (!Number.isFinite(rub) || rub <= 0) {
+      return res.redirect(`/admin/consults/${id}?error=${encodeURIComponent("Нужна сумма выплаты")}`);
+    }
+
+    const before = await prisma.consultRequest.findUnique({
+      where: { id },
+      select: { payoutPaidAt: true },
+    });
+    if (before?.payoutPaidAt) return res.redirect(`/admin/consults/${id}`);
+
+    const at = new Date();
+    await prisma.consultRequest.update({
+      where: { id },
+      data: { consultantPayoutRub: rub, payoutPaidAt: at },
+    });
+    await logAdminAction(adminId(req), "consult_payout_paid", "consult", String(id), {
+      rub,
+      at: at.toISOString(),
+    });
+    res.redirect(req.body.back ? String(req.body.back) : `/admin/consults/${id}`);
   });
 
   // ── Согласия ──────────────────────────────────────────────────────

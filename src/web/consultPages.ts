@@ -101,6 +101,10 @@ export interface ConsultPageData {
   firstContact: string;
   contactedAt: Date | null;
   doneAt: Date | null;
+  // Отметки, которых требует очередь админки.
+  diaryReceived: boolean;
+  payoutRub: number | null;
+  payoutPaidAt: Date | null;
   priceRub: number;
   source: string;
   orderId: number | null;
@@ -136,6 +140,40 @@ function statusButtons(data: ConsultPageData): string {
 
   if (!buttons.length) return html`<p class="muted">Заявка закрыта, менять статус больше нечего.</p>`;
   return html`<div class="row-actions">${raw(buttons.join(""))}</div>`;
+}
+
+// Отметки, которых требует очередь: дневник сна и выплата Софии.
+// Отдельно от статусов: это не переходы заявки, а факты рядом с ней.
+function marksForm(data: ConsultPageData): string {
+  const parts: string[] = [];
+
+  if (!data.diaryReceived) {
+    parts.push(
+      html`<form method="post" action="/admin/consults/${data.id}/diary">
+        <button type="submit" class="secondary">Дневник сна получен</button>
+      </form>`
+    );
+  }
+
+  // Выплата — только по проведённой консультации: платить за
+  // непроведённую нечего.
+  if (data.doneAt && !data.payoutPaidAt) {
+    parts.push(
+      html`<form method="post" action="/admin/consults/${data.id}/payout">
+        <input type="number" name="rub" placeholder="сумма Софии, ₽" style="max-width:160px" required>
+        <button type="submit" class="secondary">Выплата сделана</button>
+      </form>`
+    );
+  }
+
+  if (!parts.length) return "";
+  return html`<div class="card">
+    <h2>Отметки</h2>
+    <div class="row-actions" style="margin-top:0">${raw(parts.join(""))}</div>
+    <p class="muted">
+      Сумму выплаты вводим руками: доля Софии пока не зафиксирована.
+    </p>
+  </div>`;
 }
 
 export function renderConsultPage(data: ConsultPageData): string {
@@ -186,7 +224,9 @@ export function renderConsultPage(data: ConsultPageData): string {
         )}
       </table>
       ${raw(statusButtons(data))}
-    </div>`;
+    </div>
+
+    ${raw(marksForm(data))}`;
 
   const banner = data.statusChanged ? html`<div class="banner">Статус изменён.</div>` : "";
 

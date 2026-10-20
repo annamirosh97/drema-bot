@@ -1520,9 +1520,20 @@ export async function generateDraftForAdmin(api: Api, telegramId: bigint) {
     const draft = await generateRecommendationDraft(await buildPrepText(telegramId), String(telegramId));
     await recordApiCalls(draft.usage);
 
+    // aiMessage* — неизменный исходник, message* — то, что будет
+    // правиться и уйдёт родителю. При перегенерации исходник
+    // перезаписывается новым: он и есть последний черновик модели.
     await prisma.recommendation.update({
       where: { telegramId_attempt: { telegramId, attempt } },
-      data: { message1: draft.message1, message2: draft.message2, analysis: draft.analysis },
+      data: {
+        aiMessage1: draft.message1,
+        aiMessage2: draft.message2,
+        message1: draft.message1,
+        message2: draft.message2,
+        analysis: draft.analysis,
+        // Перегенерация после сбоя доставки начинает с чистого листа.
+        deliveryError: null,
+      },
     });
 
     await logOfferEvent(telegramId, "analysis_draft_created");
@@ -1577,7 +1588,13 @@ export async function keepLastRegen(telegramId: bigint): Promise<boolean> {
 
   await prisma.recommendation.update({
     where: { telegramId_attempt: { telegramId, attempt: await currentAttempt(telegramId) } },
-    data: { analysis: draft.analysis, message1: draft.message1, message2: draft.message2 },
+    data: {
+      analysis: draft.analysis,
+      aiMessage1: draft.message1,
+      aiMessage2: draft.message2,
+      message1: draft.message1,
+      message2: draft.message2,
+    },
   });
   lastRegen.delete(String(telegramId));
   return true;
@@ -2361,18 +2378,40 @@ async function sendLongMessage(api: Api, chatId: bigint, text: string, asHtml = 
   }
 }
 
+// Текст ошибки Telegram у текущего разбора. По нему он попадает в
+// очередь админки как «не доставлено», и видно, что именно случилось.
+// Сбой самой записи ничего не меняет: ошибка уже уходит вызывающему.
+async function saveDeliveryError(telegramId: bigint, error: unknown): Promise<void> {
+  const reason = (error as { description?: string })?.description ?? String(error);
+  await prisma.recommendation
+    .update({
+      where: { telegramId_attempt: { telegramId, attempt: await currentAttempt(telegramId) } },
+      data: { deliveryError: reason.slice(0, 500) },
+    })
+    .catch((dbError) => console.error("Не удалось записать ошибку доставки:", dbError));
+}
+
 // Общий хвост обоих путей — и ручного /send, и автоматического /approve:
 // помечаем рекомендацию отправленной и показываем экран оплаты.
 async function markSentAndShowOffer(api: Api, telegramId: bigint, chatId: bigint) {
+  // Сначала помечаем разбор отправленным, и только потом решаем про
+  // оффер. Порядок важен: раньше проверка согласия стояла первой и
+  // выходила из функции целиком. Родитель, отозвавший согласие между
+  // сдачей анкеты и отправкой, получал оба сообщения разбора — они
+  // уходят выше, до этой функции, — а запись оставалась pending. Такой
+  // разбор висел в очереди админки навсегда, и повторное нажатие
+  // «Отправить» присылало его во второй раз.
+  //
+  // Сообщения ушли — значит отправлено, что бы ни решилось про оффер.
+  await prisma.recommendation.update({
+    where: { telegramId_attempt: { telegramId, attempt: await currentAttempt(telegramId) } },
+    data: { status: "sent", sentAt: new Date(), deliveryError: null },
+  });
+  await logOfferEvent(telegramId, "analysis_sent");
+
   // Оффер идёт следом за разбором, за которым человек и пришёл, — это
   // не реклама. Но если согласие на данные отозвано, бот молчит совсем.
   if (!(await allowedToSend(telegramId, "SERVICE", "offer_after_analysis"))) return;
-
-  await prisma.recommendation.update({
-    where: { telegramId_attempt: { telegramId, attempt: await currentAttempt(telegramId) } },
-    data: { status: "sent", sentAt: new Date() },
-  });
-  await logOfferEvent(telegramId, "analysis_sent");
 
   await prisma.session.update({ where: { telegramId }, data: { stage: "FAKE_DOOR_OFFER" } });
 
@@ -2398,8 +2437,9 @@ export async function deliverRecommendation(
     await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading2, messages[1]), true);
   } catch (error) {
     // Ошибку пробрасываем: админу она нужна, чтобы понять, что разбор
-    // не дошёл. Статистике нужен сам факт.
+    // не дошёл. Статистике нужен сам факт, а очереди — текст ошибки.
     await logOfferEvent(telegramId, "analysis_send_failed");
+    await saveDeliveryError(telegramId, error);
     throw error;
   }
 
@@ -2429,6 +2469,13 @@ export async function sendApprovedRecommendation(api: Api, telegramId: bigint, c
     }
   }
 
+  if (recommendation?.status === "sent") {
+    // Идемпотентность по ТЗ: повторное нажатие «Отправить» не должно
+    // отправлять родителю второе сообщение. Проверка здесь, а не у
+    // вызывающих: их три, и забыть её в одном из них слишком легко.
+    throw new Error("Этот разбор уже отправлен.");
+  }
+
   if (!recommendation?.message1 || !recommendation?.message2) {
     throw new Error("Черновик разбора не найден.");
   }
@@ -2438,6 +2485,7 @@ export async function sendApprovedRecommendation(api: Api, telegramId: bigint, c
     await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading2, recommendation.message2), true);
   } catch (error) {
     await logOfferEvent(telegramId, "analysis_send_failed");
+    await saveDeliveryError(telegramId, error);
     throw error;
   }
 
