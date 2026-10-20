@@ -51,6 +51,23 @@ import {
 } from "./supportPages";
 import { authConfigured, checkCredentials, endSession, requireAuth, startSession } from "./auth";
 import { renderAuthNotConfigured, renderLoginPage } from "./loginPage";
+import { renderUserCard, renderUsersPage, usersCsv } from "./usersPages";
+import {
+  loadAllUserRows,
+  loadUserCard,
+  loadUsersPage,
+  logAdminAction,
+  parseUsersQuery,
+} from "./usersData";
+import { TIMELINE_LABELS, TimelineKind } from "./timeline";
+
+const TIMELINE_KINDS = Object.keys(TIMELINE_LABELS) as readonly TimelineKind[];
+
+// Кто сейчас в админке. Пока админ один, и его telegram id берётся из
+// переменной окружения: таблицы администраторов нет, логин — из входа.
+function adminId(_req: Request): bigint {
+  return BigInt(env.ADMIN_TELEGRAM_ID);
+}
 
 // ── Авторизация ─────────────────────────────────────────────────────
 //
@@ -611,6 +628,82 @@ export function startAdminServer(api: Api) {
   app.get("/", (_req, res) =>
     res.send("Дрёма-бот жив. Админка — /admin/orders, /admin/consults, /admin/consents и /admin/support")
   );
+
+  // ── Пользователи ──────────────────────────────────────────────────
+
+  app.get("/admin/users", async (req, res) => {
+    const query = parseUsersQuery(req.query as Record<string, unknown>);
+    res.type("html").send(renderUsersPage(await loadUsersPage(query)));
+  });
+
+  app.get("/admin/users.csv", async (req, res) => {
+    const query = parseUsersQuery(req.query as Record<string, unknown>);
+    const rows = await loadAllUserRows(query);
+    res.type("text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="drema-users.csv"');
+    res.send(usersCsv(rows));
+  });
+
+  // Карточка родителя. Отдельный адрес, чтобы ссылку можно было
+  // сохранить и переслать — так просит ТЗ.
+  app.get("/admin/users/:telegramId", async (req, res) => {
+    let telegramId: bigint;
+    try {
+      telegramId = BigInt(req.params.telegramId);
+    } catch {
+      return res.status(404).send("Такого пользователя нет.");
+    }
+
+    const kind = typeof req.query.kind === "string" ? req.query.kind : "";
+    const filter = (TIMELINE_KINDS as readonly string[]).includes(kind)
+      ? (kind as TimelineKind)
+      : "";
+
+    const data = await loadUserCard(telegramId, filter);
+    if (!data) return res.status(404).send("Такого пользователя нет.");
+    res.type("html").send(renderUserCard(data));
+  });
+
+  // Теги и заметка. Ответы родителей тут не правятся — только пометки
+  // админа, как и велит ТЗ.
+  app.post("/admin/users/:telegramId/meta", async (req, res) => {
+    const telegramId = BigInt(req.params.telegramId);
+    const tags = String(req.body.tags ?? "")
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+    const note = String(req.body.note ?? "").trim() || null;
+
+    const before = await prisma.session.findUnique({
+      where: { telegramId },
+      select: { tags: true, adminNote: true },
+    });
+
+    await prisma.session.update({ where: { telegramId }, data: { tags, adminNote: note } });
+    await logAdminAction(adminId(req), "user_meta_changed", "session", String(telegramId), {
+      tags: { from: before?.tags ?? [], to: tags },
+      note: { from: before?.adminNote ?? null, to: note },
+    });
+
+    res.redirect(`/admin/users/${telegramId}`);
+  });
+
+  // Отметка запроса на удаление данных. Само удаление — отдельная
+  // процедура, которой пока нет: порядок определит юрист.
+  app.post("/admin/users/:telegramId/deletion", async (req, res) => {
+    const telegramId = BigInt(req.params.telegramId);
+    const at = new Date();
+    // updateMany с условием: повторное нажатие не должно сдвигать дату
+    // запроса на сегодня.
+    await prisma.session.updateMany({
+      where: { telegramId, deletionRequestedAt: null },
+      data: { deletionRequestedAt: at },
+    });
+    await logAdminAction(adminId(req), "deletion_requested", "session", String(telegramId), {
+      at: at.toISOString(),
+    });
+    res.redirect(`/admin/users/${telegramId}`);
+  });
 
   app.get("/admin/orders", async (_req, res) => {
     const orders = await prisma.order.findMany({ orderBy: { createdAt: "desc" }, take: 100 });

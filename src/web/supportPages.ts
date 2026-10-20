@@ -118,7 +118,8 @@ export function renderSupportListPage(data: SupportListData): string {
     html`<h1>Поддержка</h1>
       <p class="muted">
         Сначала те, кто ждёт ответа · красным — ждут больше суток ·
-        <a href="/admin/consents">согласия</a> · <a href="/admin/orders">заказы</a>
+        <a href="/admin/consents">согласия</a> · <a href="/admin/users">пользователи</a> ·
+        <a href="/admin/orders">заказы</a>
       </p>
 
       <div class="card">

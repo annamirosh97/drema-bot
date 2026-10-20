@@ -75,6 +75,7 @@ export function renderConsentSearchPage(query: string, rows: ConsentSearchRow[])
       <p class="muted">
         Поиск по telegram id или username ·
         <a href="/admin/marketing">список рассылки</a> ·
+        <a href="/admin/users">пользователи</a> ·
         <a href="/admin/orders">заказы</a>
       </p>
       <div class="card">

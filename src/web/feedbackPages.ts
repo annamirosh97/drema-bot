@@ -82,6 +82,7 @@ export function renderAnalysisFeedbackPage(data: AnalysisFeedbackPageData): stri
       <p class="muted">
         Только «Отчасти» и «Не совсем»: ради них страница и нужна ·
         <a href="/admin/feedback/pdf">результат плана</a> ·
+        <a href="/admin/users">пользователи</a> ·
         <a href="/admin/orders">заказы</a>
       </p>
 
@@ -150,6 +151,7 @@ export function renderPdfFeedbackPage(data: PdfFeedbackPageData): string {
       <p class="muted">
         Что ответили через неделю после плана ·
         <a href="/admin/feedback/analysis">оценка разбора</a> ·
+        <a href="/admin/users">пользователи</a> ·
         <a href="/admin/orders">заказы</a>
       </p>
 
