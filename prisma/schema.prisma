@@ -87,7 +87,6 @@ model Session {
   // остаются в базе и после перезапуска.
   recommendations Recommendation[]
   orders          Order[]
-  offerEvents     OfferEvent[]
   consultRequests ConsultRequest[]
   upsellOffer     UpsellOffer?
   quizReminders   QuizReminder[]
@@ -516,6 +515,8 @@ enum OfferEventType {
   onb_pd_consent
   onb_marketing
   onb_go
+  // quiz_q1 не пишется с 20.10.2026: его заменил quiz_question_shown с
+  // номером 1. Тип оставлен ради записей, сделанных раньше.
   quiz_q1
   quiz_completed
   guide_sent
@@ -557,18 +558,122 @@ enum OfferEventType {
   quiz_resumed_after_reminder_1
   quiz_resumed_after_reminder_2
   quiz_completed_after_reminder
+
+  // ── Полная разметка воронки (20.10.2026) ──────────────────────────
+  //
+  // С этого момента событие пишется каждый раз, когда шаг происходит:
+  // дедупликации «раз на человека» больше нет, уникальных людей считаем
+  // в SQL через DISTINCT. Исключение — guide_sent: гайд и по продукту
+  // отправляется один раз.
+
+  // Онбординг: ответы на экранах, а не только их показы.
+  onb_health_ok
+  onb_pd_granted
+  onb_pd_declined
+  onb_marketing_yes
+  onb_marketing_no
+
+  // Анкета. questionNumber обязателен.
+  quiz_question_shown
+  quiz_question_answered
+  quiz_answer_invalid
+  quiz_out_of_range
+
+  // Сверка и правка ответов.
+  quiz_summary_shown
+  quiz_edit_started
+  quiz_edit_question_shown
+  quiz_edit_invalid_pick
+  quiz_edit_answered
+  quiz_edit_more
+  quiz_edit_done
+
+  // После анкеты.
+  quiz_addendum_received
+  analysis_draft_created
+  analysis_sent
+  analysis_send_failed
+
+  // Покупка плана.
+  buy_repeat_click
+  order_generation_started
+  order_generation_failed
+  pdf_sent
+
+  // Апселл.
+  upsell_back
+  upsell_skipped
+
+  // Заявка на консультацию.
+  consult_contact_shared
+  consult_self_contact
+  consult_wrong_contact
+  consult_signup_duplicate
+  consult_sent_to_specialist
+
+  // CSAT: сама оценка и текст остаются в ответах 30 и 31.
+  csat_rated
+  csat_feedback_left
+
+  // Меню.
+  menu_back_to_quiz
+
+  // Данные и согласия.
+  data_opened
+  marketing_unsubscribed
+  marketing_subscribed
+  pd_revoke_asked
+  pd_revoked
+  pd_revoke_cancelled
+  message_suppressed
+
+  // Бот поддержки. У этих событий attempt = 0, если сессии нет.
+  support_started
+  support_ask_clicked
+  support_thread_opened
+  support_message_in
+  support_reply_out
+  support_unsupported_type
+
+  // Служебное.
+  closed_mode_blocked
+  unrecognized_input
+  consent_write_failed
+  bot_blocked
 }
 
+// Журнал событий: по нему строится воронка родителя от /start до покупки
+// (см. analytics/funnel.sql).
+//
+// Связи с Session здесь намеренно нет, хотя telegramId тот же. Причины
+// две. Первая: события пишет и бот поддержки, а туда приходят люди,
+// которых в основном боте нет вовсе, — внешний ключ ломал бы вставку.
+// Вторая: журнал аналитики не должен исчезать вместе с сессией, иначе
+// любой /reset переписывал бы историю.
+//
+// Плата за это — события не удаляются каскадом. Когда появится
+// процедура удаления данных по отзыву согласия, снести их нужно явно:
+// см. пометку в src/dataCommand.ts.
 model OfferEvent {
   id         Int            @id @default(autoincrement())
   telegramId BigInt
   type       OfferEventType
+  // Номер вопроса анкеты у событий анкеты, правки ответов и
+  // напоминаний; у остальных NULL. Тип и кодировка те же, что у
+  // Session.currentQuestionNumber: вопросы целые, кроме условного 4.5
+  // («своими словами»), который так и хранится как 4.5.
+  questionNumber Float?
+  // Номер прохождения анкеты на момент события. У записей, сделанных до
+  // появления этой колонки, NULL: по старым данным прохождения честно
+  // не различить. Ноль — событие человека, у которого сессии нет
+  // (пришёл только в бот поддержки).
+  attempt    Int?
   createdAt  DateTime       @default(now())
-
-  session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
 
   @@index([telegramId])
   @@index([type])
+  @@index([telegramId, attempt, createdAt])
+  @@index([type, createdAt])
 }
 
 // PENDING_PAYMENT и PAID заведены заранее, как у заказа PDF: позже между
