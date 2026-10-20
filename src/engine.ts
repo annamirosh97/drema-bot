@@ -6,6 +6,7 @@ import { buildPrepText, safeGetQuestion } from "./prep";
 import { replyPhotoStatic, replyStatic, sendStatic } from "./send";
 import { allowedToSend, getConsentState } from "./consents";
 import { MENU_CALLBACKS, sendDocs, sendMenu, sendSupport, sendTeam } from "./menu";
+import { logEvent } from "./events";
 import {
   QUIZ_DONE_REASON,
   handleQuizContinue,
@@ -143,6 +144,7 @@ export async function handleIncoming(ctx: Context) {
   // Закрытый режим — самое первое, что проверяется: сессию и любые
   // другие следы заводить нельзя, пока человек не в списке.
   if (!isAllowed(from.id)) {
+    await logOfferEvent(BigInt(from.id), "closed_mode_blocked");
     if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
     return replyStatic(ctx, texts.notOpenYet);
   }
@@ -279,6 +281,7 @@ export async function handleIncoming(ctx: Context) {
     case "CSAT_FEEDBACK":
       return handleCsatFeedback(ctx, session, messageText);
     case "CSAT_DONE":
+      await logOfferEvent(session.telegramId, "unrecognized_input");
       return replyStatic(ctx, texts.csatThankYou);
     case "DECLINED":
     case "OUT_OF_RANGE":
@@ -383,6 +386,9 @@ async function handleMenuCallback(ctx: Context, session: Session, callbackData: 
       await logOfferEvent(session.telegramId, "menu_team");
       return sendTeam(ctx, back);
     case "menu_back":
+      // Следом resendCurrentStep напишет quiz_question_shown: по паре
+      // событий видно, откуда человек вернулся.
+      await logOfferEvent(session.telegramId, "menu_back_to_quiz");
       return resendCurrentStep(ctx, session);
   }
 }
@@ -509,9 +515,13 @@ async function confirmRestart(ctx: Context, session: Session) {
     });
   }
 
+  // Номер прохождения передаём явно: это событие закрывает прежнее
+  // прохождение, а не открывает новое. Полагаться на то, что сессию
+  // увеличат строкой ниже, а не выше, слишком хрупко.
   await logOfferEvent(
     telegramId,
-    pending ? "restart_confirmed_cancelled_draft" : "restart_confirmed"
+    pending ? "restart_confirmed_cancelled_draft" : "restart_confirmed",
+    { attempt: session.attempt }
   );
 
   // Напоминания прошлого прохождения больше не нужны: у нового будут
@@ -603,12 +613,17 @@ export const ONBOARDING_FUNNEL = [
   "onb_pd_consent",
   "onb_marketing",
   "onb_go",
-  "quiz_q1",
+  // Был quiz_q1, который с 20.10.2026 не пишется.
+  "quiz_question_shown",
   "quiz_completed",
 ] as const;
 
 type OnboardingEvent = OfferEventName;
 
+// Было ли такое событие хоть раз. Нужно ровно в двух местах, где
+// однократность — свойство продукта, а не статистики: гайд отправляется
+// один раз на человека, и по наличию onb_welcome опознаётся тот, кто
+// застал прежнее приветствие.
 async function hasOnboardingEvent(telegramId: number | bigint, type: OnboardingEvent) {
   const existing = await prisma.offerEvent.findFirst({
     where: { telegramId: BigInt(telegramId), type },
@@ -616,18 +631,15 @@ async function hasOnboardingEvent(telegramId: number | bigint, type: OnboardingE
   return existing !== null;
 }
 
-// Событие показа экрана. Пишется один раз на человека: в /stats шаги
-// считаются по уникальным людям, поэтому повторные проходы воронку
-// всё равно не раздувают, а таблица не растёт от каждого /start.
+// Показ экрана онбординга. С 20.10.2026 пишется каждый раз, а не один
+// раз на человека: по журналу должно быть видно и второй проход, и
+// возврат к онбордингу после «Начать заново». Уникальных людей считаем
+// в SQL через DISTINCT (см. analytics/funnel.sql).
 //
-// Сбой записи не должен мешать человеку идти дальше — это статистика.
+// Отдельное имя оставлено ради читаемости вызовов: на экранах
+// онбординга «logOnboarding» говорит больше, чем «logEvent».
 async function logOnboarding(telegramId: number | bigint, type: OnboardingEvent) {
-  try {
-    if (await hasOnboardingEvent(telegramId, type)) return;
-    await prisma.offerEvent.create({ data: { telegramId: BigInt(telegramId), type } });
-  } catch (error) {
-    console.error(`Не удалось записать шаг онбординга ${type}:`, error);
-  }
+  await logEvent(telegramId, type);
 }
 
 // ── Онбординг ────────────────────────────────────────────────────────
@@ -768,6 +780,7 @@ async function handleTermsHealth(ctx: Context, session: Session, callbackData?: 
     });
     if (!saved) return;
 
+    await logOfferEvent(session.telegramId, "onb_health_ok");
     await dropKeyboard(ctx);
     return afterTermsHealth(ctx, session);
   }
@@ -842,6 +855,7 @@ async function saveConsent(ctx: Context, input: Parameters<typeof recordConsent>
     return true;
   } catch (error) {
     console.error(`Не удалось записать согласие ${input.type} для #${input.telegramId}:`, error);
+    await logOfferEvent(input.telegramId, "consent_write_failed");
     await replyStatic(ctx, texts.consentSaveFailed).catch(() => {});
     return false;
   }
@@ -862,6 +876,7 @@ async function handlePdConsent(ctx: Context, session: Session, callbackData?: st
     });
     if (!saved) return;
 
+    await logOfferEvent(session.telegramId, granted ? "onb_pd_granted" : "onb_pd_declined");
     await dropKeyboard(ctx);
     if (granted) return goToMarketingConsent(ctx, session);
 
@@ -912,6 +927,7 @@ async function handleMarketingConsent(ctx: Context, session: Session, callbackDa
     });
     if (!saved) return;
 
+    await logOfferEvent(session.telegramId, granted ? "onb_marketing_yes" : "onb_marketing_no");
     await dropKeyboard(ctx);
     // Отказ от рассылки ни на что, кроме рассылок, не влияет: дальше
     // оба ответа ведут одинаково.
@@ -944,7 +960,9 @@ async function startQuestionnaire(ctx: Context, session: Session) {
   });
   await logOnboarding(session.telegramId, "onb_go");
   await replyWithOptionalPhoto(ctx, texts.goStart, photos.goStart, undefined, true);
-  await logOnboarding(session.telegramId, "quiz_q1");
+  // quiz_q1 больше не пишем: показ первого вопроса записывает сам
+  // sendQuestionPrompt как quiz_question_shown с номером 1.
+  //
   // Отсчёт напоминаний начинается здесь: до первого вопроса напоминать
   // не о чем.
   await startQuizReminders(session.telegramId, await currentAttempt(session.telegramId));
@@ -1048,7 +1066,25 @@ async function replyWithOptionalPhoto(
   return asHtml ? replyStatic(ctx, text, options) : ctx.reply(text, options);
 }
 
-async function sendQuestionPrompt(ctx: Context, question: QuestionDef, selected: string[]) {
+type QuestionShownEvent = "quiz_question_shown" | "quiz_edit_question_shown";
+
+// Событие показа пишется здесь, а не в вызывающих: вопрос показывается
+// из семи разных мест (первый вопрос, переход к следующему, возврат из
+// меню, кнопка из напоминания, команда посреди анкеты, прыжок админа,
+// правка ответа), и любое из них легко забыть разметить.
+//
+// Правка ответов пишет свой тип: её показы не должны смешиваться с
+// основным прохождением, иначе воронка по вопросам соврёт.
+async function sendQuestionPrompt(
+  ctx: Context,
+  question: QuestionDef,
+  selected: string[],
+  event: QuestionShownEvent = "quiz_question_shown"
+) {
+  if (ctx.from) {
+    await logOfferEvent(BigInt(ctx.from.id), event, { questionNumber: question.number });
+  }
+
   let markup;
   if (question.type === "single_choice" && question.options) {
     markup = singleChoiceKeyboard(question.options);
@@ -1120,11 +1156,13 @@ async function consumeAnswer(
 ): Promise<AnswerOutcome> {
   if (question.type === "number") {
     if (!messageText) {
+      await logOfferEvent(session.telegramId, "quiz_answer_invalid", { questionNumber: qNum });
       await replyStatic(ctx, texts.invalidNumber);
       return { kind: "handled" };
     }
     const num = Number(messageText.replace(",", "."));
     if (Number.isNaN(num)) {
+      await logOfferEvent(session.telegramId, "quiz_answer_invalid", { questionNumber: qNum });
       await replyStatic(ctx, texts.invalidNumber);
       return { kind: "handled" };
     }
@@ -1140,6 +1178,7 @@ async function consumeAnswer(
         where: { telegramId: session.telegramId },
         data: { stage: "OUT_OF_RANGE", status: "out_of_range" },
       });
+      await logOfferEvent(session.telegramId, "quiz_out_of_range", { questionNumber: qNum });
       await replyStatic(ctx, texts.outOfRange);
       return { kind: "handled" };
     }
@@ -1149,6 +1188,7 @@ async function consumeAnswer(
 
   if (question.type === "free_text") {
     if (!messageText) {
+      await logOfferEvent(session.telegramId, "quiz_answer_invalid", { questionNumber: qNum });
       await ctx.reply("Напишите, пожалуйста, ответ текстом.");
       return { kind: "handled" };
     }
@@ -1158,6 +1198,7 @@ async function consumeAnswer(
 
   if (question.type === "single_choice") {
     if (!callbackData || !question.options?.includes(callbackData)) {
+      await logOfferEvent(session.telegramId, "quiz_answer_invalid", { questionNumber: qNum });
       await sendQuestionPrompt(ctx, question, []);
       return { kind: "handled" };
     }
@@ -1167,7 +1208,10 @@ async function consumeAnswer(
   }
 
   // multi_choice
-  if (!callbackData || !question.options?.includes(callbackData)) return { kind: "handled" };
+  if (!callbackData || !question.options?.includes(callbackData)) {
+    await logOfferEvent(session.telegramId, "quiz_answer_invalid", { questionNumber: qNum });
+    return { kind: "handled" };
+  }
 
   if (callbackData === "Готово") {
     const selections = session.tempSelections;
@@ -1208,6 +1252,7 @@ async function handleQuestion(ctx: Context, session: Session, callbackData?: str
   const outcome = await consumeAnswer(ctx, session, question, qNum, callbackData, messageText);
   if (outcome.kind !== "saved") return;
 
+  await logOfferEvent(session.telegramId, "quiz_question_answered", { questionNumber: qNum });
   return advanceQuestionnaire(ctx, session.telegramId, qNum);
 }
 
@@ -1288,6 +1333,8 @@ async function buildSummaryText(telegramId: bigint): Promise<string> {
 }
 
 async function sendSummary(ctx: Context, telegramId: bigint) {
+  await logOfferEvent(telegramId, "quiz_summary_shown");
+
   const body = await buildSummaryText(telegramId);
 
   for (const chunk of splitForTelegram(`${texts.summaryHeader}\n\n${body}`)) {
@@ -1318,6 +1365,7 @@ async function handleSummaryReview(ctx: Context, session: Session, callbackData?
   }
 
   if (callbackData === "summary_edit") {
+    await logOfferEvent(session.telegramId, "quiz_edit_started");
     await dropKeyboard(ctx);
     await prisma.session.update({
       where: { telegramId: session.telegramId },
@@ -1439,6 +1487,7 @@ export async function generateDraftForAdmin(api: Api, telegramId: bigint) {
       data: { message1: draft.message1, message2: draft.message2, analysis: draft.analysis },
     });
 
+    await logOfferEvent(telegramId, "analysis_draft_created");
     await api.sendMessage(adminChatId, `Черновик разбора для #${telegramId} готов — вот он целиком:`);
     await sendLongMessage(api, BigInt(adminChatId), formatDraftMessage(texts.draftHeading1, draft.message1), true);
     await sendLongMessage(api, BigInt(adminChatId), formatDraftMessage(texts.draftHeading2, draft.message2), true);
@@ -1582,6 +1631,7 @@ async function handleEditPickQuestion(ctx: Context, session: Session, messageTex
   const question = Number.isInteger(position) ? questions[position - 1] : undefined;
 
   if (!question) {
+    await logOfferEvent(session.telegramId, "quiz_edit_invalid_pick");
     return replyStatic(ctx, texts.editUnknownNumber(questions.length ? `1–${questions.length}` : "—"));
   }
   return startEditingQuestion(ctx, session.telegramId, question, answers);
@@ -1607,7 +1657,7 @@ async function startEditingQuestion(
     where: { telegramId },
     data: { stage: "EDIT_ANSWER", currentQuestionNumber: question.number, tempSelections: selected },
   });
-  return sendQuestionPrompt(ctx, question, selected);
+  return sendQuestionPrompt(ctx, question, selected, "quiz_edit_question_shown");
 }
 
 async function handleEditAnswer(ctx: Context, session: Session, callbackData?: string, messageText?: string) {
@@ -1619,6 +1669,7 @@ async function handleEditAnswer(ctx: Context, session: Session, callbackData?: s
   const outcome = await consumeAnswer(ctx, session, question, qNum, callbackData, messageText);
   if (outcome.kind !== "saved") return;
 
+  await logOfferEvent(session.telegramId, "quiz_edit_answered", { questionNumber: qNum });
   return afterEditSaved(ctx, session.telegramId);
 }
 
@@ -1656,6 +1707,7 @@ async function afterEditSaved(ctx: Context, telegramId: bigint) {
 
 async function handleEditMore(ctx: Context, session: Session, callbackData?: string) {
   if (callbackData === "edit_more_yes") {
+    await logOfferEvent(session.telegramId, "quiz_edit_more");
     await dropKeyboard(ctx);
     await prisma.session.update({
       where: { telegramId: session.telegramId },
@@ -1665,6 +1717,7 @@ async function handleEditMore(ctx: Context, session: Session, callbackData?: str
   }
 
   if (callbackData === "edit_more_no") {
+    await logOfferEvent(session.telegramId, "quiz_edit_done");
     await dropKeyboard(ctx);
     return goToSummary(ctx, session.telegramId);
   }
@@ -1762,6 +1815,7 @@ export async function handleResetCommand(ctx: Context) {
 async function handleAwaitingRecommendation(ctx: Context, session: Session, messageText?: string) {
   if (!messageText) return;
   await saveAnswer(session.telegramId, 99, messageText);
+  await logOfferEvent(session.telegramId, "quiz_addendum_received");
   return replyStatic(ctx, texts.addendumAck);
 }
 
@@ -1926,6 +1980,7 @@ async function handleBuy(ctx: Context, session: Session) {
   });
 
   if (existing) {
+    await logOfferEvent(session.telegramId, "buy_repeat_click");
     return replyStatic(
       ctx,
       existing.status === "SENT" ? texts.orderAlreadySent : texts.orderAlreadyGenerating
@@ -1963,6 +2018,7 @@ async function handleBuy(ctx: Context, session: Session) {
 }
 
 export async function createPdfOrder(telegramId: bigint) {
+  await logOfferEvent(telegramId, "order_generation_started");
   return prisma.order.create({
     data: {
       telegramId,
@@ -2004,12 +2060,50 @@ type OfferEventName =
   | "restart_asked"
   | "restart_confirmed"
   | "restart_confirmed_cancelled_draft"
-  | "restart_cancelled";
+  | "restart_cancelled"
+  // Полная разметка воронки, 20.10.2026.
+  | "onb_health_ok"
+  | "onb_pd_granted"
+  | "onb_pd_declined"
+  | "onb_marketing_yes"
+  | "onb_marketing_no"
+  | "quiz_question_shown"
+  | "quiz_question_answered"
+  | "quiz_answer_invalid"
+  | "quiz_out_of_range"
+  | "quiz_summary_shown"
+  | "quiz_edit_started"
+  | "quiz_edit_question_shown"
+  | "quiz_edit_invalid_pick"
+  | "quiz_edit_answered"
+  | "quiz_edit_more"
+  | "quiz_edit_done"
+  | "quiz_addendum_received"
+  | "analysis_draft_created"
+  | "analysis_sent"
+  | "analysis_send_failed"
+  | "buy_repeat_click"
+  | "order_generation_started"
+  | "order_generation_failed"
+  | "pdf_sent"
+  | "consult_contact_shared"
+  | "consult_self_contact"
+  | "consult_wrong_contact"
+  | "consult_signup_duplicate"
+  | "consult_sent_to_specialist"
+  | "csat_rated"
+  | "csat_feedback_left"
+  | "menu_back_to_quiz"
+  | "closed_mode_blocked"
+  | "unrecognized_input"
+  | "consent_write_failed";
 
-async function logOfferEvent(telegramId: bigint, type: OfferEventName) {
-  await prisma.offerEvent
-    .create({ data: { telegramId, type } })
-    .catch((error) => console.error("Не удалось записать событие оффера:", error));
+async function logOfferEvent(
+  telegramId: bigint,
+  type: OfferEventName,
+  opts: { questionNumber?: number; attempt?: number } = {}
+) {
+  await logEvent(telegramId, type, opts);
 }
 
 // ── Генерация платного PDF ──────────────────────────────────────────
@@ -2116,6 +2210,7 @@ export async function runPdfGeneration(api: Api, orderId: number, reviewerCommen
 
     if (!redFlag) console.error(`Не удалось собрать PDF для заказа #${orderId}:`, error);
 
+    await logOfferEvent(order.telegramId, "order_generation_failed");
     await prisma.order
       .update({ where: { id: orderId }, data: { status: "FAILED", failReason: reason } })
       .catch((dbError) => console.error("И статус заказа обновить не вышло:", dbError));
@@ -2165,6 +2260,7 @@ export async function approveAndSendPdf(api: Api, orderId: number): Promise<void
     where: { id: orderId },
     data: { status: "SENT", sentAt: new Date() },
   });
+  await logOfferEvent(order.telegramId, "pdf_sent");
 
   // Через неделю спросим, что изменилось со сном.
   await schedulePdfFeedback(orderId, order.telegramId);
@@ -2185,6 +2281,7 @@ async function handleCsatRating(ctx: Context, session: Session, callbackData?: s
   if (!match) return replyStatic(ctx, texts.csatPrompt, { reply_markup: csatKeyboard() });
 
   await saveAnswer(session.telegramId, 30, match[1]);
+  await logOfferEvent(session.telegramId, "csat_rated");
   await prisma.session.update({ where: { telegramId: session.telegramId }, data: { stage: "CSAT_FEEDBACK" } });
   return replyStatic(ctx, texts.csatFeedbackPrompt);
 }
@@ -2192,6 +2289,7 @@ async function handleCsatRating(ctx: Context, session: Session, callbackData?: s
 async function handleCsatFeedback(ctx: Context, session: Session, messageText?: string) {
   if (!messageText) return; // тишина ок, ничего страшного не происходит
   await saveAnswer(session.telegramId, 31, messageText);
+  await logOfferEvent(session.telegramId, "csat_feedback_left");
   await prisma.session.update({ where: { telegramId: session.telegramId }, data: { stage: "CSAT_DONE" } });
   return replyStatic(ctx, texts.csatThankYou);
 }
@@ -2233,6 +2331,7 @@ async function markSentAndShowOffer(api: Api, telegramId: bigint, chatId: bigint
     where: { telegramId_attempt: { telegramId, attempt: await currentAttempt(telegramId) } },
     data: { status: "sent", sentAt: new Date() },
   });
+  await logOfferEvent(telegramId, "analysis_sent");
 
   await prisma.session.update({ where: { telegramId }, data: { stage: "FAKE_DOOR_OFFER" } });
 
@@ -2253,8 +2352,15 @@ export async function deliverRecommendation(
   chatId: bigint,
   messages: [string, string]
 ) {
-  await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading1, messages[0]), true);
-  await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading2, messages[1]), true);
+  try {
+    await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading1, messages[0]), true);
+    await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading2, messages[1]), true);
+  } catch (error) {
+    // Ошибку пробрасываем: админу она нужна, чтобы понять, что разбор
+    // не дошёл. Статистике нужен сам факт.
+    await logOfferEvent(telegramId, "analysis_send_failed");
+    throw error;
+  }
 
   await prisma.recommendation.update({
     where: { telegramId_attempt: { telegramId, attempt: await currentAttempt(telegramId) } },
@@ -2286,8 +2392,13 @@ export async function sendApprovedRecommendation(api: Api, telegramId: bigint, c
     throw new Error("Черновик разбора не найден.");
   }
 
-  await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading1, recommendation.message1), true);
-  await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading2, recommendation.message2), true);
+  try {
+    await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading1, recommendation.message1), true);
+    await sendLongMessage(api, chatId, formatDraftMessage(texts.draftHeading2, recommendation.message2), true);
+  } catch (error) {
+    await logOfferEvent(telegramId, "analysis_send_failed");
+    throw error;
+  }
 
   await markSentAndShowOffer(api, telegramId, chatId);
 }

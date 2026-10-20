@@ -16,6 +16,7 @@ import { env } from "./env";
 import { formatPrice, texts } from "./texts";
 import { startConsultRequest } from "./consult";
 import { allowedToSend } from "./consents";
+import { logEvent } from "./events";
 import { isAllowed } from "./engine";
 import { isPermanentSendError } from "./feedback";
 import { escapeHtml, replyStatic, sendStatic } from "./send";
@@ -127,10 +128,16 @@ export async function sendDueUpsells(api: Api) {
     done.add(key);
 
     try {
-      if (!isAllowed(order.telegramId)) continue;
+      if (!isAllowed(order.telegramId)) {
+        await logUpsellEvent(order.telegramId, "upsell_skipped");
+        continue;
+      }
       // Это предложение, а не то, за чем человек пришёл: без согласия
       // на рассылку оно не уходит, и отказ записывается.
-      if (!(await allowedToSend(order.telegramId, "MARKETING", "upsell_offer"))) continue;
+      if (!(await allowedToSend(order.telegramId, "MARKETING", "upsell_offer"))) {
+        await logUpsellEvent(order.telegramId, "upsell_skipped");
+        continue;
+      }
       await sendUpsell(api, order.id, order.telegramId);
     } catch (error) {
       console.error(`Не удалось отправить предложение по заказу #${order.id}:`, error);
@@ -143,6 +150,7 @@ export async function sendDueUpsells(api: Api) {
             data: { skipReason: "родитель остановил бота" },
           })
           .catch(() => {});
+        await logUpsellEvent(order.telegramId, "upsell_skipped");
       }
     }
   }
@@ -188,12 +196,12 @@ type UpsellEvent =
   | "upsell_details"
   | "upsell_signup"
   | "upsell_declined"
-  | "upsell_expired_click";
+  | "upsell_expired_click"
+  | "upsell_back"
+  | "upsell_skipped";
 
 async function logUpsellEvent(telegramId: bigint, type: UpsellEvent) {
-  await prisma.offerEvent
-    .create({ data: { telegramId, type } })
-    .catch((error) => console.error("Не удалось записать событие предложения:", error));
+  await logEvent(telegramId, type);
 }
 
 // Та же логика, что у карточек основного оффера: правим то же
@@ -225,6 +233,7 @@ export async function handleUpsell(ctx: Context, session: Session, callbackData:
   }
 
   if (callbackData === "upsell_back") {
+    await logUpsellEvent(session.telegramId, "upsell_back");
     return replaceWithCard(
       ctx,
       texts.upsellOffer(price(), fullPrice(offer), date, offerUrl()),

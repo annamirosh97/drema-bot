@@ -20,6 +20,7 @@ import { buildPrepText } from "./prep";
 import { currentAttempt } from "./attempt";
 import { CONSULT_SELF_WRITE_BUTTON, consultConsentKeyboard } from "./keyboards";
 import { escapeHtml, replyStatic } from "./send";
+import { logEvent } from "./events";
 
 // Заявки в этих статусах считаются живыми: пока такая есть, вторую не
 // создаём. DONE и CANCELED не мешают записаться заново.
@@ -149,6 +150,7 @@ export async function startConsultRequest(
     orderBy: { createdAt: "desc" },
   });
   if (existing) {
+    await logEvent(session.telegramId, "consult_signup_duplicate");
     await replyStatic(ctx, texts.consultAlreadyExists(escapeHtml(env.SPECIALIST_USERNAME)));
     return null;
   }
@@ -227,6 +229,7 @@ export async function takeConsultContact(
   // Переслать можно контакт любого человека из своей книги. Чужой номер
   // специалисту не нужен и согласием не является.
   if (contact.user_id == null || BigInt(contact.user_id) !== session.telegramId) {
+    await logEvent(session.telegramId, "consult_wrong_contact");
     await replyStatic(ctx, texts.consultContactNotYours, { reply_markup: consultConsentKeyboard() });
     return true;
   }
@@ -252,6 +255,7 @@ export async function takeConsultContact(
     "Поделиться контактом"
   );
 
+  await logEvent(session.telegramId, "consult_contact_shared");
   await replyStatic(ctx, texts.consultAccepted(escapeHtml(env.SPECIALIST_USERNAME)), {
     reply_markup: { remove_keyboard: true },
   });
@@ -278,6 +282,7 @@ export async function takeConsultSelfWrite(ctx: Context, session: Session): Prom
     CONSULT_SELF_WRITE_BUTTON
   );
 
+  await logEvent(session.telegramId, "consult_self_contact");
   await replyStatic(ctx, texts.consultSelfWrite(escapeHtml(env.SPECIALIST_USERNAME), request.id), {
     reply_markup: { remove_keyboard: true },
   });
@@ -457,6 +462,7 @@ export async function sendConsultPackage(api: Api, requestId: number): Promise<v
 
   try {
     await sendTo(specialist);
+    await logEvent(request.telegramId, "consult_sent_to_specialist");
   } catch (error) {
     // Бот может писать специалисту только после того, как она нажала
     // /start. Пока этого нет, заявка всё равно у админа — её можно

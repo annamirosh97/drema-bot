@@ -30,6 +30,7 @@ import { texts } from "./texts";
 import { sendStatic } from "./send";
 import { allowedToSend } from "./consents";
 import { isAllowed, inQuestionnaire, resendCurrentStep } from "./engine";
+import { logEvent as writeEvent } from "./events";
 import { isPermanentSendError, nextWindowOpening, withinWindow } from "./feedback";
 import { quizReminder1Keyboard, quizReminder2Keyboard } from "./keyboards";
 
@@ -41,10 +42,10 @@ const HOUR_MS = 3_600_000;
 // того же дня, и выглядело бы это как настойчивость.
 const MIN_GAP_MS = 12 * HOUR_MS;
 
-async function logEvent(telegramId: bigint, type: string) {
-  await prisma.offerEvent
-    .create({ data: { telegramId, type: type as never } })
-    .catch((error) => console.error(`Не удалось записать событие ${type}:`, error));
+// У событий напоминаний есть номер вопроса: по нему в /stats считается,
+// на каких вопросах люди останавливаются.
+async function logEvent(telegramId: bigint, type: string, questionNumber?: number | null) {
+  await writeEvent(telegramId, type as never, { questionNumber });
 }
 
 // ── Начало и конец ──────────────────────────────────────────────────
@@ -145,7 +146,15 @@ export async function markQuizActivity(telegramId: bigint, attempt: number): Pro
     if (resumedAfter) {
       const sentAt = resumedAfter === 1 ? row.reminder1SentAt! : row.reminder2SentAt!;
       if (now.getTime() - sentAt.getTime() <= 24 * HOUR_MS) {
-        await logEvent(telegramId, `quiz_resumed_after_reminder_${resumedAfter}`);
+        const session = await prisma.session.findUnique({
+          where: { telegramId },
+          select: { currentQuestionNumber: true },
+        });
+        await logEvent(
+          telegramId,
+          `quiz_resumed_after_reminder_${resumedAfter}`,
+          session?.currentQuestionNumber ?? null
+        );
       }
     }
 
@@ -184,7 +193,11 @@ function firstAnswerAfterReminder(row: QuizReminder): 1 | 2 | null {
 // анкете» в меню. Состояние сценария не меняет: это не ответ, а просто
 // повтор вопроса.
 export async function handleQuizContinue(ctx: Context, session: Session): Promise<void> {
-  await logEvent(session.telegramId, "quiz_reminder_continue_click");
+  await logEvent(
+    session.telegramId,
+    "quiz_reminder_continue_click",
+    session.currentQuestionNumber
+  );
 
   // Анкету могли закончить или начать заново уже после того, как
   // напоминание ушло. Начатая заново анкета стоит на своём вопросе, и
@@ -320,7 +333,7 @@ async function deliver(api: Api, row: QuizReminder, session: Session, which: 1 |
         reminder2ScheduledAt: new Date(Math.max(fromActivity, minGap)),
       },
     });
-    await logEvent(row.telegramId, "quiz_reminder_1_sent");
+    await logEvent(row.telegramId, "quiz_reminder_1_sent", session.currentQuestionNumber);
     return;
   }
 
@@ -338,7 +351,7 @@ async function deliver(api: Api, row: QuizReminder, session: Session, which: 1 |
       remindersStoppedReason: "оба напоминания отправлены",
     },
   });
-  await logEvent(row.telegramId, "quiz_reminder_2_sent");
+  await logEvent(row.telegramId, "quiz_reminder_2_sent", session.currentQuestionNumber);
 }
 
 

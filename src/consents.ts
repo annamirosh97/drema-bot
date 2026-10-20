@@ -18,6 +18,7 @@ import type {
   LegalDocType,
 } from "@prisma/client";
 import { prisma } from "./prisma";
+import { logEvent } from "./events";
 import { env } from "./env";
 import { activeDocumentIds } from "./legalDocs";
 
@@ -192,6 +193,7 @@ export async function logSuppressed(
 ): Promise<void> {
   try {
     await prisma.suppressedMessage.create({ data: { telegramId, category, kind } });
+    await logEvent(telegramId, "message_suppressed");
   } catch (error) {
     console.error(`Не удалось записать подавленное сообщение ${kind}:`, error);
   }

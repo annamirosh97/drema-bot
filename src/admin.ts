@@ -88,7 +88,7 @@ const FUNNEL_LABELS: Record<string, string> = {
   onb_pd_consent: "Согласие на данные",
   onb_marketing: "Рассылка",
   onb_go: "Погнали",
-  quiz_q1: "Первый вопрос",
+  quiz_question_shown: "Первый вопрос",
   quiz_completed: "Анкета завершена",
 };
 

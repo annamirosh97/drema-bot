@@ -12,6 +12,8 @@ import { Bot, Context, InlineKeyboard } from "grammy";
 import { prisma } from "../prisma";
 import { env } from "../env";
 import { supportTexts } from "./texts";
+import { logEvent } from "../events";
+import { trackBlockedUsers } from "../blockedTracker";
 import type { CardIdentity } from "./card";
 import {
   closeTopic,
@@ -121,6 +123,7 @@ async function handleParentMessage(bot: Bot, ctx: Context) {
   });
 
   if (info.type === "unsupported") {
+    await logEvent(telegramId, "support_unsupported_type");
     await ctx.reply(supportTexts.unsupported);
     return;
   }
@@ -159,6 +162,11 @@ async function handleParentMessage(bot: Bot, ctx: Context) {
   // разговор открылся заново. Иначе человек, пишущий в три сообщения,
   // получил бы три одинаковых ответа.
   const isFirst = thread.lastUserMessageAt === null;
+  // Открытие обращения отличаем от очередного сообщения: по первому
+  // считается, сколько людей вообще обратились, по второму — объём
+  // переписки.
+  if (isFirst || reopened) await logEvent(telegramId, "support_thread_opened");
+  await logEvent(telegramId, "support_message_in");
   if (isFirst || reopened) await ctx.reply(supportTexts.received);
 }
 
@@ -238,6 +246,7 @@ async function handleGroupMessage(bot: Bot, ctx: Context) {
       message.message_id
     );
 
+    await logEvent(thread.telegramId, "support_reply_out");
     await storeMessage({
       threadId: thread.id,
       direction: "OUT",
@@ -368,6 +377,7 @@ export function startSupportBot(): void {
   }
 
   const bot = new Bot(env.SUPPORT_BOT_TOKEN);
+  trackBlockedUsers(bot.api);
 
   // Диагностика по группе: по этим строкам видно, доходят ли до бота
   // обновления оттуда, от кого они и считается ли человек своим. В
@@ -389,6 +399,7 @@ export function startSupportBot(): void {
     if (ctx.chat?.type !== "private") return;
     // Параметр ссылки (/start src_pdf) запоминаем как источник.
     const source = ctx.match?.toString().trim() || undefined;
+    await logEvent(ctx.from!.id, "support_started");
     await getOrCreateThread(BigInt(ctx.from!.id), source);
     await ctx.reply(supportTexts.welcome, {
       link_preview_options: { is_disabled: true },
@@ -415,6 +426,7 @@ export function startSupportBot(): void {
   bot.callbackQuery("support_ask", async (ctx) => {
     await ctx.answerCallbackQuery().catch(() => {});
     await ctx.editMessageReplyMarkup().catch(() => {});
+    await logEvent(ctx.from!.id, "support_ask_clicked");
     await ctx.reply(supportTexts.askQuestion);
   });
 

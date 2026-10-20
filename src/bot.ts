@@ -1,5 +1,6 @@
 import { Bot, Context } from "grammy";
 import { env } from "./env";
+import { trackBlockedUsers } from "./blockedTracker";
 import {
   handleIncoming,
   handleGotoCommand,
@@ -18,6 +19,10 @@ import { loadLegalDocuments } from "./legalDocs";
 import { countUsersWithoutPdConsent } from "./consents";
 
 const bot = new Bot(env.BOT_TOKEN);
+
+// Трансформер видит все исходящие вызовы: 403 «бота остановили» будет
+// записан событием независимо от того, откуда шла отправка.
+trackBlockedUsers(bot.api);
 
 // Про race condition, которая ломала анкету в Make при быстрых повторных
 // сообщениях от одного пользователя: bot.start() ниже — это простой

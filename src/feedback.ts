@@ -28,6 +28,7 @@ import { texts } from "./texts";
 import { replyStatic, sendStatic } from "./send";
 import { allowedToSend } from "./consents";
 import { isAllowed } from "./engine";
+import { logEvent as writeEvent } from "./events";
 import { orderUrl } from "./web/server";
 import {
   ANALYSIS_RATINGS,
@@ -149,10 +150,10 @@ export function isPermanentSendError(error: unknown): boolean {
   );
 }
 
+// Запись идёт через общий журнал: только там заполняется номер
+// прохождения, без которого воронка не собирается.
 async function logEvent(telegramId: bigint, type: string) {
-  await prisma.offerEvent
-    .create({ data: { telegramId, type: type as never } })
-    .catch((error) => console.error(`Не удалось записать событие ${type}:`, error));
+  await writeEvent(telegramId, type as never);
 }
 
 // ── Планирование ────────────────────────────────────────────────────

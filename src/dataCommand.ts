@@ -14,6 +14,7 @@ import type { ConsentAction, ConsentSource } from "@prisma/client";
 import { env } from "./env";
 import { texts } from "./texts";
 import { escapeHtml, replyStatic } from "./send";
+import { logEvent } from "./events";
 import {
   ConsentInput,
   formatMoscow,
@@ -77,6 +78,7 @@ async function sendOverview(ctx: Context, telegramId: bigint) {
 export async function handleDataCommand(ctx: Context) {
   const from = ctx.from;
   if (!from) return;
+  await logEvent(from.id, "data_opened");
   return sendOverview(ctx, BigInt(from.id));
 }
 
@@ -89,6 +91,7 @@ async function save(ctx: Context, input: ConsentInput): Promise<boolean> {
     return true;
   } catch (error) {
     console.error(`Не удалось записать согласие ${input.type} для #${input.telegramId}:`, error);
+    await logEvent(input.telegramId, "consent_write_failed");
     await replyStatic(ctx, texts.consentSaveFailed).catch(() => {});
     return false;
   }
@@ -129,6 +132,7 @@ async function setMarketing(
     if (!saved) return;
   }
 
+  await logEvent(telegramId, action === "GRANTED" ? "marketing_subscribed" : "marketing_unsubscribed");
   await replyStatic(
     ctx,
     action === "GRANTED" ? texts.marketingGranted : texts.marketingRevoked
@@ -166,6 +170,7 @@ export async function handleDataCallback(ctx: Context, callbackData: string) {
   }
 
   if (callbackData === "data_revoke_pd") {
+    await logEvent(telegramId, "pd_revoke_asked");
     await dropKeyboard(ctx);
     return replyStatic(ctx, texts.pdRevokeConfirm, {
       reply_markup: pdRevokeConfirmKeyboard(),
@@ -173,6 +178,7 @@ export async function handleDataCallback(ctx: Context, callbackData: string) {
   }
 
   if (callbackData === "data_revoke_no") {
+    await logEvent(telegramId, "pd_revoke_cancelled");
     await dropKeyboard(ctx);
     return replyStatic(ctx, texts.pdRevokeCancelled);
   }
@@ -199,9 +205,17 @@ async function revokePdConsent(ctx: Context, telegramId: bigint) {
   });
   if (!saved) return;
 
+  await logEvent(telegramId, "pd_revoked");
   await replyStatic(ctx, texts.pdRevoked);
 
   // Данные автоматически не удаляем: порядок удаления определит юрист.
+  //
+  // ВАЖНО для того, кто будет делать удаление: кроме ответов, разборов,
+  // заказов и заявок нужно снести и журнал событий — таблицу OfferEvent.
+  // Каскадом она больше не удаляется: внешний ключ на Session снят
+  // 20.10.2026, потому что события пишет и бот поддержки, где сессии
+  // может не быть вовсе. Журнал согласий (ConsentRecord) не удаляется
+  // никогда: он append-only и защищён триггером в базе.
   // Админу уходит срок, до которого это нужно сделать руками.
   const deadline = new Date(Date.now() + DELETION_DAYS * 24 * 3_600_000);
   await ctx.api
