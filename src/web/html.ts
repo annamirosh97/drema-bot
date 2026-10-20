@@ -43,6 +43,9 @@ export function raw(value: string): Raw {
 }
 
 const STYLES = `
+  .logout { margin: 32px 0 8px; opacity: .55 }
+  .logout:hover { opacity: 1 }
+  .login .logout { display: none }
   :root {
     --bg: #FBF4E8; --card: #fff; --ink: #1B1A3A; --muted: #6b6a85;
     --line: #e4ddd0; --accent: #8C7BB8; --warn: #F3C99A; --danger: #E3A598;
@@ -103,6 +106,8 @@ const STYLES = `
   .banner.warn { background: #FFF6E6; }
 `;
 
+// Кнопка выхода есть на каждой странице: без неё единственный способ
+// завершить сессию — ждать, пока она истечёт сама.
 export function page(title: string, body: string): string {
   return `<!doctype html>
 <html lang="ru">
@@ -112,6 +117,8 @@ export function page(title: string, body: string): string {
 <title>${escape(title)} · Дрёма</title>
 <style>${STYLES}</style>
 </head>
-<body><div class="wrap">${body}</div></body>
+<body><div class="wrap">${body}
+<form method="post" action="/admin/logout" class="logout"><button type="submit" class="secondary">Выйти</button></form>
+</div></body>
 </html>`;
 }
