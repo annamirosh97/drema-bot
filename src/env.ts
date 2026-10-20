@@ -59,10 +59,28 @@ export const env = {
   // Разделены, чтобы сравнивать качество и цену по шагам, не трогая код.
   PDF_PLAN_MODEL: process.env.PDF_PLAN_MODEL || "claude-opus-5",
   PDF_WRITER_MODEL: process.env.PDF_WRITER_MODEL || "claude-opus-5",
-  // Пароль к веб-админке, где проверяются черновики PDF. Если не задан,
-  // админка не поднимается, а бот работает как обычно — чтобы деплой до
-  // того, как переменная прописана, не ронял бота целиком.
+  // Вход в админку. Логин не секрет, пароль хранится хэшем: получить
+  // его командой `npm run admin:hash`. Секрет подписи сессий —
+  // случайная строка; её смена разлогинивает всех, и это нормально.
+  //
+  // Если любая из трёх переменных не задана, админка не поднимается, а
+  // бот работает как обычно: деплой до того, как их прописали, не
+  // должен ронять бота целиком. Открытая админка хуже недоступной.
+  ADMIN_LOGIN: process.env.ADMIN_LOGIN ?? "",
+  ADMIN_PASSWORD_HASH: process.env.ADMIN_PASSWORD_HASH ?? "",
+  ADMIN_SESSION_SECRET: process.env.ADMIN_SESSION_SECRET ?? "",
+  // Ставить ли cookie флаг Secure. На Railway — да, локально нет:
+  // иначе cookie не доедет по http и админку нельзя отладить.
+  ADMIN_HTTPS_ONLY: (process.env.ADMIN_HTTPS_ONLY ?? "true") !== "false",
+  // Старый пароль basic auth. Оставлен только для того, чтобы деплой с
+  // прежними переменными не остался вообще без защиты, пока новые не
+  // прописаны: см. src/web/server.ts.
   ADMIN_PASSWORD: process.env.ADMIN_PASSWORD ?? "",
+  // Пороги таймеров ожидания из ТЗ админки, в часах. Вынесены в
+  // переменные, потому что обещание родителю может измениться.
+  SLA_PROMISE_HOURS: parseInt(process.env.SLA_PROMISE_HOURS ?? "24", 10) || 24,
+  SLA_WARN_HOURS: parseInt(process.env.SLA_WARN_HOURS ?? "12", 10) || 12,
+  SLA_DANGER_HOURS: parseInt(process.env.SLA_DANGER_HOURS ?? "20", 10) || 20,
   // Порт веб-админки. На Railway подставляется автоматически.
   PORT: parseInt(process.env.PORT ?? "3000", 10) || 3000,
   // Публичный адрес приложения — из него собираются ссылки на заказы,

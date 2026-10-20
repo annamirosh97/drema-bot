@@ -49,22 +49,21 @@ import {
   renderSupportListPage,
   renderSupportThreadPage,
 } from "./supportPages";
+import { authConfigured, checkCredentials, endSession, requireAuth, startSession } from "./auth";
+import { renderAuthNotConfigured, renderLoginPage } from "./loginPage";
 
 // ── Авторизация ─────────────────────────────────────────────────────
-
-// Basic auth: логин не проверяем, он может быть любым — пользователь
-// ровно один, и значение имеет только пароль.
-function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const header = req.headers.authorization ?? "";
-  const [scheme, encoded] = header.split(" ");
-
-  if (scheme === "Basic" && encoded) {
-    const password = Buffer.from(encoded, "base64").toString("utf8").split(":").slice(1).join(":");
-    if (password === env.ADMIN_PASSWORD) return next();
-  }
-
-  res.setHeader("WWW-Authenticate", 'Basic realm="Drema admin", charset="UTF-8"');
-  res.status(401).send("Нужен пароль.");
+//
+// Basic auth заменён входом по логину с сессией: см. src/web/auth.ts,
+// там же причины. Чего не хватает для входа — показываем прямо, чтобы
+// не гадать по пустой странице.
+function notConfiguredPage(): string {
+  const missing = [
+    !env.ADMIN_LOGIN && "ADMIN_LOGIN",
+    !env.ADMIN_PASSWORD_HASH && "ADMIN_PASSWORD_HASH",
+    !env.ADMIN_SESSION_SECRET && "ADMIN_SESSION_SECRET",
+  ].filter((name): name is string => Boolean(name));
+  return renderAuthNotConfigured(missing);
 }
 
 // ── Чтение черновика ────────────────────────────────────────────────
@@ -542,23 +541,49 @@ export function startAdminServer(api: Api) {
   const app = express();
   app.use(express.urlencoded({ extended: false }));
 
-  // Сервер поднимаем всегда, даже когда пароль не задан. Если не
+  // ── Вход ──────────────────────────────────────────────────────────
+  //
+  // Страница входа — единственная под /admin, доступная без сессии.
+  // Регистрируется до проверки, иначе войти было бы некуда.
+  app.get("/admin/login", (req, res) => {
+    if (!authConfigured()) return res.status(503).type("html").send(notConfiguredPage());
+    const back = typeof req.query.next === "string" && req.query.next.startsWith("/")
+      ? req.query.next
+      : "/admin";
+    res.type("html").send(renderLoginPage({ failed: req.query.failed === "1", next: back }));
+  });
+
+  app.post("/admin/login", (req, res) => {
+    if (!authConfigured()) return res.status(503).type("html").send(notConfiguredPage());
+
+    const login = String(req.body.login ?? "");
+    const password = String(req.body.password ?? "");
+    // Редирект только на свой путь: открытый редирект из параметра —
+    // классическая дыра, через неё уводят на поддельную форму входа.
+    const raw = String(req.body.next ?? "/admin");
+    const back = raw.startsWith("/") ? raw : "/admin";
+
+    if (!checkCredentials(login, password)) {
+      console.warn(`Неудачный вход в админку с логином «${login}».`);
+      return res.redirect(`/admin/login?failed=1&next=${encodeURIComponent(back)}`);
+    }
+
+    startSession(res, login);
+    res.redirect(back);
+  });
+
+  app.post("/admin/logout", (_req, res) => {
+    endSession(res);
+    res.redirect("/admin/login");
+  });
+
+  // Сервер поднимаем всегда, даже когда вход не настроен. Если его не
   // поднять, хостингу некуда маршрутизировать запрос, и в браузере
   // вместо объяснения получается «Application failed to respond», по
   // которому не понять, бот упал, порт не тот или дело в переменной.
-  // Поэтому без пароля админка отвечает честным 503 с объяснением.
+  // Поэтому без настроек админка отвечает честным 503 с объяснением.
   app.use("/admin", (req, res, next) => {
-    if (!env.ADMIN_PASSWORD) {
-      return res
-        .status(503)
-        .type("html")
-        .send(
-          "<h1>Админка не настроена</h1>" +
-            "<p>Не задана переменная окружения <code>ADMIN_PASSWORD</code>. " +
-            "Добавь её в Variables сервиса и перезапусти деплой.</p>" +
-            "<p>Сам бот при этом работает.</p>"
-        );
-    }
+    if (!authConfigured()) return res.status(503).type("html").send(notConfiguredPage());
     return requireAuth(req, res, next);
   });
 
@@ -878,8 +903,11 @@ export function startAdminServer(api: Api) {
   // с другого интерфейса, и на localhost его просто никто не услышит.
   app.listen(env.PORT, "0.0.0.0", () => {
     console.log(`HTTP-сервер слушает 0.0.0.0:${env.PORT}`);
-    if (!env.ADMIN_PASSWORD) {
-      console.warn("ADMIN_PASSWORD не задан — админка отвечает 503. Бот работает.");
+    if (!authConfigured()) {
+      console.warn(
+        "Вход в админку не настроен (ADMIN_LOGIN, ADMIN_PASSWORD_HASH, " +
+          "ADMIN_SESSION_SECRET) — админка отвечает 503. Бот работает."
+      );
       return;
     }
     const base = env.PUBLIC_BASE_URL || `http://localhost:${env.PORT}`;
