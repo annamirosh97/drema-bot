@@ -77,6 +77,22 @@ model Session {
   // прохождений остаются в базе, но в новый разбор не попадают: читаем
   // только строки с этим номером (см. currentAttempt в engine.ts).
   attempt             Int           @default(1)
+  // ── Поля для админки ──────────────────────────────────────────────
+  // username Telegram без «@». Обновляется при каждом входе: человек
+  // может его сменить, а админке нужен актуальный, чтобы открыть чат.
+  // До 20.10.2026 username хранился только в заявке на консультацию.
+  username            String?
+  // Параметр deep-link из /start: откуда человек пришёл.
+  source              String?
+  // Ручные пометки админа. На поведение бота не влияют.
+  tags                String[]      @default([])
+  adminNote           String?
+  // Когда Telegram впервые ответил 403 на отправку этому человеку.
+  // Ставится трансформером API, см. src/blockedTracker.ts.
+  botBlockedAt        DateTime?
+  // Когда человек попросил удалить данные. Само удаление — отдельная
+  // процедура, которой пока нет: порядок определит юрист.
+  deletionRequestedAt DateTime?
   tempSelections      String[]      @default([]) // текущие выбранные варианты multi_choice (до "Готово")
   yellowFlags         String[]      @default([]) // накопленные жёлтые флаги для ручной проверки
   createdAt           DateTime      @default(now())
@@ -90,6 +106,7 @@ model Session {
   consultRequests ConsultRequest[]
   upsellOffer     UpsellOffer?
   quizReminders   QuizReminder[]
+  attempts        QuestionnaireAttempt[]
 
   @@index([status])
 }
@@ -126,6 +143,13 @@ model Recommendation {
   message4   String?
   status     RecommendationStatus @default(pending)
   sentAt     DateTime?
+  // Старт таймера ожидания: момент, с которого родитель ждёт разбор.
+  // Отдельно от createdAt, потому что строка создаётся при завершении
+  // анкеты, а таймер в будущем может стартовать и от другого события.
+  waitStartedAt DateTime?
+  // Текст ошибки Telegram, если разбор не дошёл. Таймер при этом не
+  // останавливается: родитель всё ещё ждёт.
+  deliveryError String?
   // Почему разбор отменён. Пока причина одна — человек начал заново, —
   // но текст хранится строкой: в админке он показывается как есть.
   cancelReason String?
@@ -196,6 +220,13 @@ model Order {
   yookassaPaymentId String?
   paidAt            DateTime?
   refundedAt        DateTime?
+  // Чек самозанятого. Пока оплата не подключена, статус ставит админ
+  // руками, и до подключения у большинства заказов он NOT_NEEDED.
+  receiptStatus     ReceiptStatus @default(NOT_NEEDED)
+  receiptUrl        String?
+  // Ошибка Telegram при отправке готового файла. failReason выше — про
+  // сбой генерации, это разные вещи: план может собраться и не дойти.
+  deliveryError     String?
 
   session  Session      @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
   draft    PdfDraft?
@@ -730,6 +761,13 @@ model ConsultRequest {
   yookassaPaymentId String?
   paidAt            DateTime?
   refundedAt        DateTime?
+  // Дневник сна за 3–5 дней: без него София не начинает разбор.
+  diaryReceived     Boolean       @default(false)
+  // Доля Софии. Заполняется вручную при отметке выплаты: процент пока
+  // не решён, и считать автоматически нечего.
+  consultantPayoutRub Int?
+  payoutPaidAt        DateTime?
+  note                String?
 
   session Session      @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
   upsell  UpsellOffer?
@@ -808,4 +846,75 @@ model QuizReminder {
   @@unique([telegramId, attempt])
   @@index([reminder1ScheduledAt])
   @@index([reminder2ScheduledAt])
+}
+
+// Чек самозанятого по оплаченному заказу.
+enum ReceiptStatus {
+  NOT_NEEDED // оплата не подключена или заказ не оплачен
+  PENDING // оплачен, чек ещё не выбит
+  ISSUED // чек выбит, ссылка в receiptUrl
+}
+
+// Состояние прохождения анкеты.
+//
+// ABANDONED здесь нет намеренно: «нет активности 48 часов» — это не
+// событие, а наблюдение в момент просмотра. Хранить такой статус
+// значит держать фоновую задачу, которая его проставляет, и жить с
+// тем, что между её тиками статус врёт. Админка считает заброшенность
+// из lastActivityAt при каждом запросе (см. src/web/attempts.ts).
+enum AttemptStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+// Одно прохождение анкеты.
+//
+// До 20.10.2026 прохождение было просто числом в Session.attempt, и по
+// нему нельзя было узнать ни когда человек начал, ни где остановился.
+// Теперь на каждое прохождение есть строка, которая завод��тся при
+// показе первого вопроса и закрывается при подтверждении анкеты.
+//
+// У прохождений, существовавших до миграции, startedAt и lastStep
+// восстановлены приблизительно: точных данных по ним в базе нет.
+model QuestionnaireAttempt {
+  id            Int           @id @default(autoincrement())
+  telegramId    BigInt
+  attemptNumber Int
+  // Версия анкеты на момент прохождения: вопросы со временем меняются,
+  // и без версии старые ответы нельзя честно сравнивать с новыми.
+  questionnaireVersion String
+  startedAt     DateTime      @default(now())
+  completedAt   DateTime?
+  // Номер вопроса, на котором человек стоит или остановился. Тот же
+  // формат, что у Session.currentQuestionNumber: условный вопрос 4.5
+  // так и хранится.
+  lastStep      Float?
+  lastActivityAt DateTime     @default(now())
+  status        AttemptStatus @default(IN_PROGRESS)
+
+  session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
+
+  @@unique([telegramId, attemptNumber])
+  @@index([status, lastActivityAt])
+}
+
+// Журнал действий админа. Нужен затем, чтобы через месяц можно было
+// понять, кто поменял текст разбора или перевёл заказ в оплаченные.
+//
+// adminId — telegram id админа: отдельной таблицы администраторов нет,
+// их пока один, и логин хранится в переменных окружения.
+model AdminAction {
+  id         Int      @id @default(autoincrement())
+  adminId    BigInt
+  action     String // краткий код: draft_edited, order_marked_paid, …
+  entityType String // recommendation, order, consult, session
+  entityId   String // id записи строкой: ключи у таблиц разных типов
+  // Что именно изменилось. Для правки текста — старое и новое значение,
+  // для смены статуса — оба статуса.
+  diff       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([entityType, entityId])
+  @@index([adminId])
 }

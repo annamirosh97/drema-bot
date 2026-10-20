@@ -7,6 +7,7 @@ import { replyPhotoStatic, replyStatic, sendStatic } from "./send";
 import { allowedToSend, getConsentState } from "./consents";
 import { MENU_CALLBACKS, sendDocs, sendMenu, sendSupport, sendTeam } from "./menu";
 import { logEvent } from "./events";
+import { completeAttempt, markAttemptStep, startAttempt } from "./attempts";
 import {
   QUIZ_DONE_REASON,
   handleQuizContinue,
@@ -90,11 +91,21 @@ import {
 
 // ── Вспомогательные функции работы с БД ─────────────────────────────
 
-async function getOrCreateSession(telegramId: bigint, chatId: bigint, firstName?: string): Promise<Session> {
+// username обновляем при каждом входе: человек может его сменить, а
+// админке нужен актуальный, чтобы открыть чат. Источник, наоборот,
+// пишем только при создании — это то, откуда человек пришёл впервые, и
+// переписывать его следующим deep-link нельзя.
+async function getOrCreateSession(
+  telegramId: bigint,
+  chatId: bigint,
+  firstName?: string,
+  username?: string,
+  source?: string
+): Promise<Session> {
   return prisma.session.upsert({
     where: { telegramId },
-    update: { chatId, firstName: firstName ?? undefined },
-    create: { telegramId, chatId, firstName },
+    update: { chatId, firstName: firstName ?? undefined, username: username ?? undefined },
+    create: { telegramId, chatId, firstName, username, source },
   });
 }
 
@@ -151,7 +162,16 @@ export async function handleIncoming(ctx: Context) {
 
   const telegramId = BigInt(from.id);
   const chatId = BigInt(ctx.chat.id);
-  const session = await getOrCreateSession(telegramId, chatId, from.first_name);
+  // Параметр deep-link «/start utm_vk» запоминаем как источник. У
+  // остальных сообщений его нет, и значение не трогается.
+  const startSource = startPayload(ctx.message?.text);
+  const session = await getOrCreateSession(
+    telegramId,
+    chatId,
+    from.first_name,
+    from.username,
+    startSource
+  );
 
   const callbackData = ctx.callbackQuery?.data;
   const messageText = ctx.message?.text?.trim();
@@ -288,6 +308,14 @@ export async function handleIncoming(ctx: Context) {
     case "RED_FLAG_ENDED":
       return resetToWelcomeAndSend(ctx, session);
   }
+}
+
+// Параметр команды /start: «/start utm_vk» → «utm_vk». Длину режем,
+// потому что в deep-link можно положить что угодно, а поле источника
+// нужно для группировки, а не для хранения мусора.
+function startPayload(text?: string): string | undefined {
+  const match = text?.match(/^\/start(?:@\S+)?\s+(\S{1,64})/);
+  return match?.[1];
 }
 
 // ── Возврат к прерванному шагу (кнопка из меню) ─────────────────────
@@ -963,9 +991,11 @@ async function startQuestionnaire(ctx: Context, session: Session) {
   // quiz_q1 больше не пишем: показ первого вопроса записывает сам
   // sendQuestionPrompt как quiz_question_shown с номером 1.
   //
-  // Отсчёт напоминаний начинается здесь: до первого вопроса напоминать
-  // не о чем.
-  await startQuizReminders(session.telegramId, await currentAttempt(session.telegramId));
+  // Отсчёт напоминаний и строка прохождения начинаются здесь: до
+  // первого вопроса напоминать не о чем и прохождения ещё нет.
+  const attemptNumber = await currentAttempt(session.telegramId);
+  await startQuizReminders(session.telegramId, attemptNumber);
+  await startAttempt(session.telegramId, attemptNumber, first);
   return sendQuestionPrompt(ctx, getQuestion(first), []);
 }
 
@@ -1253,6 +1283,10 @@ async function handleQuestion(ctx: Context, session: Session, callbackData?: str
   if (outcome.kind !== "saved") return;
 
   await logOfferEvent(session.telegramId, "quiz_question_answered", { questionNumber: qNum });
+  // Последний шаг прохождения двигаем только здесь, в основном пути
+  // анкеты. Правка ответов его не трогает: человек правит с экрана
+  // сверки, и «остановился на вопросе 2» было бы неправдой.
+  await markAttemptStep(session.telegramId, session.attempt, qNum);
   return advanceQuestionnaire(ctx, session.telegramId, qNum);
 }
 
@@ -1387,10 +1421,14 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
   });
   const attempt = await currentAttempt(telegramId);
   await stopQuizReminders(telegramId, attempt, QUIZ_DONE_REASON);
+  await completeAttempt(telegramId, attempt);
+  // waitStartedAt — момент, с которого родитель ждёт разбор. Совпадает
+  // с созданием строки, но хранится отдельно: таймер в админке не
+  // должен зависеть от того, когда именно появилась запись.
   await prisma.recommendation.upsert({
     where: { telegramId_attempt: { telegramId, attempt } },
     update: {},
-    create: { telegramId, attempt, status: "pending" },
+    create: { telegramId, attempt, status: "pending", waitStartedAt: new Date() },
   });
 
   // Всё, что дальше, запускаем в фоне и результата не ждём: обращение к
@@ -1791,6 +1829,9 @@ export async function handleResetCommand(ctx: Context) {
 
   await prisma.answer.deleteMany({ where: { telegramId } });
   await prisma.recommendation.deleteMany({ where: { telegramId } });
+  // Иначе прохождение осталось бы со статусом «завершено» при пустой
+  // анкете, и в админке это выглядело бы как потерянные ответы.
+  await prisma.questionnaireAttempt.deleteMany({ where: { telegramId } });
   await prisma.session.update({
     where: { telegramId },
     data: {

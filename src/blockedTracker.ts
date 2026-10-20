@@ -15,6 +15,7 @@
 
 import type { Api } from "grammy";
 import { logEvent } from "./events";
+import { prisma } from "./prisma";
 
 const DAY_MS = 24 * 3_600_000;
 
@@ -63,6 +64,15 @@ export function trackBlockedUsers(api: Api): void {
             // Не ждём записи: отправка уже провалилась, и вызывающий
             // должен получить свою ошибку без задержки на базу.
             void logEvent(id, "bot_blocked");
+            // Плашка в карточке родителя. Ставим только первый раз:
+            // важно, когда человек ушёл, а не когда мы заметили это в
+            // последний раз.
+            void prisma.session
+              .updateMany({
+                where: { telegramId: BigInt(id), botBlockedAt: null },
+                data: { botBlockedAt: new Date() },
+              })
+              .catch((error) => console.error("Не удалось отметить блокировку:", error));
           }
         }
       }
