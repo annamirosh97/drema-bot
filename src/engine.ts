@@ -4,7 +4,7 @@ import { env } from "./env";
 import { formatPrice, photos, texts } from "./texts";
 import { buildPrepText, safeGetQuestion } from "./prep";
 import { replyPhotoStatic, replyStatic, sendStatic } from "./send";
-import { allowedToSend, getConsentState } from "./consents";
+import { allowedToSend } from "./consents";
 import { MENU_CALLBACKS, sendDocs, sendMenu, sendSupport, sendTeam } from "./menu";
 import { logEvent } from "./events";
 import { completeAttempt, markAttemptStep, startAttempt } from "./attempts";
@@ -704,12 +704,14 @@ async function beginNewAttempt(session: Session, reason: NewAttemptReason) {
 // начал пользоваться ботом до появления согласий, экраны показываются
 // посреди сценария, и этот путь менять не просили.
 async function afterTermsHealth(ctx: Context, session: Session) {
-  if (session.attempt <= 1) return goToPdConsent(ctx, session);
-
-  const state = await getConsentState(session.telegramId);
-
+  // Спрашиваем по факту согласия, а не по номеру прохождения. Эти
+  // условия расходятся на том, кто дал согласие, но анкету не закончил:
+  // он остаётся на первом прохождении, и по номеру экран согласия
+  // показали бы ему второй раз, хотя ответ уже лежит в журнале.
+  //
   // Без согласия на обработку данных дальше нельзя никому и никогда.
-  if (state.PD_PROCESSING.action !== "GRANTED") return goToPdConsent(ctx, session);
+  const pd = await getConsent(session.telegramId, "PD_PROCESSING");
+  if (pd.action !== "GRANTED") return goToPdConsent(ctx, session);
 
   // Про рассылку здесь больше не спрашиваем: вопрос переехал за анкету,
   // чтобы не стоять между человеком и первым вопросом.
