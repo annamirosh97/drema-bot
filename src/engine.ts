@@ -537,6 +537,16 @@ async function handleStartCommand(ctx: Context, session: Session) {
 
   if (await hasAnswersInAttempt(session.telegramId)) {
     await beginNewAttempt(session, "start");
+  } else {
+    // Прохождение заводить незачем, но на приветствие сессию перевести
+    // обязательно. Иначе человек видит первый экран, а бот считает, что
+    // он всё ещё на прежнем, и следующая кнопка уходит в его обработчик:
+    // «Что я получу?» с застрявшей стадией TERMS_HEALTH возвращала
+    // «Прежде чем начать».
+    await prisma.session.update({
+      where: { telegramId: session.telegramId },
+      data: { stage: "WELCOME", status: "onboarding", resumeStage: null },
+    });
   }
 
   return sendWelcome(ctx);
