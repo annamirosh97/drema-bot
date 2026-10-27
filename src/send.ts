@@ -14,7 +14,7 @@
 // раз простым текстом без тегов, а ошибка пишется в лог. Лучше потерять
 // жирный заголовок, чем сообщение.
 
-import { Api, Context } from "grammy";
+import { Api, Context, InputFile } from "grammy";
 
 export function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -69,7 +69,7 @@ export async function sendStatic(
 // у неё тот же.
 export async function replyPhotoStatic(
   ctx: Context,
-  photo: string,
+  photo: string | InputFile,
   caption: string,
   options: SendOptions = {}
 ) {

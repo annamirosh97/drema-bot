@@ -56,30 +56,42 @@ export async function sendCachedDocument(
   if (fileId) cache.set(path, { fileId, hash });
 }
 
-// То же для фотографии: фото команды в меню. Отдельная функция, а не
-// флаг у предыдущей, потому что Telegram возвращает фото не одним
-// file_id, а набором размеров, и брать из него нужно самый большой —
-// именно он соответствует загруженному файлу.
+// То же для фотографии, но отправку выполняет вызывающий: у картинок
+// анкеты своя подпись, разметка и клавиатура, и одной функцией «пришли
+// фото» они не покрываются. Сюда вынесено только то, что у всех общее, —
+// подстановка известного file_id и повторная попытка файлом, если
+// Telegram его отверг.
 //
-// Файла может не быть вовсе (фото команды в репозиторий ещё не
-// положили), поэтому сначала спрашиваем — наличие проверяет вызывающий.
-export async function sendCachedPhoto(ctx: Context, path: string): Promise<void> {
+// Отдельно от sendCachedDocument, а не флагом, потому что Telegram
+// возвращает фото не одним file_id, а набором размеров, и брать из него
+// нужно самый большой — именно он соответствует загруженному файлу.
+export async function withCachedPhoto<T extends { photo?: { file_id: string }[] }>(
+  path: string,
+  send: (photo: string | InputFile) => Promise<T>
+): Promise<T> {
   const hash = hashOf(path);
   const cached = cache.get(path);
 
   if (cached?.hash === hash) {
     try {
-      await ctx.replyWithPhoto(cached.fileId);
-      return;
+      return await send(cached.fileId);
     } catch (error) {
       console.error(`Не удалось отправить ${path} по file_id, загружаю заново:`, error);
       cache.delete(path);
     }
   }
 
-  const sent = await ctx.replyWithPhoto(new InputFile(path));
+  const sent = await send(new InputFile(path));
   const largest = sent.photo?.[sent.photo.length - 1]?.file_id;
   if (largest) cache.set(path, { fileId: largest, hash });
+  return sent;
+}
+
+// Голая картинка без подписи: фото команды в меню и картинка после
+// анкеты. Файла может не быть вовсе (фото команды в репозиторий ещё не
+// положили), поэтому наличие проверяет вызывающий.
+export async function sendCachedPhoto(ctx: Context, path: string): Promise<void> {
+  await withCachedPhoto(path, (photo) => ctx.replyWithPhoto(photo));
 }
 
 // Есть ли файл на диске. Нужно меню: фото команды необязательно, и его

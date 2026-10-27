@@ -3,12 +3,16 @@
 // Картинки к статическим сообщениям: ключ — имя текста из `texts` ниже.
 // Текст уходит подписью к фото, поэтому такие сообщения должны быть
 // короче 1024 символов (лимит подписи в Telegram). Картинки к вопросам
-// анкеты живут не здесь, а в поле photoUrl в questions.ts.
+// анкеты живут не здесь, а в поле photo в questions.ts.
+//
+// Пути в репозитории, а не ссылки: картинку по ссылке Telegram качает
+// при каждой отправке, и недоступная папка молча оставляла бы анкету
+// без картинок.
 export const photos = {
-  goStart: "https://lh3.googleusercontent.com/d/13QrZzZJ-g6Dd6qleotIWZ4Nv7h9wmEX8",
+  goStart: "assets/photos/start.jpg",
   // Приходит отдельным сообщением, без подписи: текст про гид уходит
   // вместе с самим файлом, следующим сообщением.
-  questionnaireComplete: "https://lh3.googleusercontent.com/d/12QvjcR_tEhGtiFyp3FP3UfoS4Uo94EBe",
+  questionnaireComplete: "assets/photos/quiz-complete.jpg",
 };
 
 // Цена с разделителем тысяч: 4990 → «4 990». Пробел неразрывный, чтобы

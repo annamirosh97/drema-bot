@@ -24,7 +24,7 @@ export interface QuestionDef {
   // сам текст вопроса, обрезанный по длине.
   shortLabel?: string;
   // Картинка к вопросу: текст уходит подписью к фото (лимит подписи в Telegram — 1024 символа).
-  photoUrl?: string;
+  photo?: string; // путь в репозитории, см. assets/photos
   min?: number;
   max?: number;
   // Если true — выход за пределы [min, max] завершает анкету (сейчас только вопрос 1).
@@ -124,7 +124,7 @@ export const QUESTIONS: QuestionDef[] = [
       "Чтобы разобраться точнее, расскажите про режим сна малыша. Если ведёте дневник в приложении, можете свериться с ним. Если нет, просто опишите по памяти, как обычно проходит день и ночь.",
     type: "single_choice",
     options: ["Продолжить"],
-    photoUrl: "https://lh3.googleusercontent.com/d/1OU3tB9ohUvYq8f2qVvJ4qljCSVwOpoAY",
+    photo: "assets/photos/schedule.jpg",
   },
   {
     number: 10,
@@ -165,7 +165,7 @@ export const QUESTIONS: QuestionDef[] = [
       "Ничего не помогает",
       "Готово",
     ],
-    photoUrl: "https://lh3.googleusercontent.com/d/1IpfI30brTMLTsOJXOfEKfZlDN53mNd3D",
+    photo: "assets/photos/settling.jpg",
   },
   {
     number: 13,

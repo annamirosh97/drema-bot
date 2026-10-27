@@ -39,7 +39,7 @@ import {
 import { PaidRedFlagError, PdfContent, generatePdfDraft } from "./paidPdf";
 import { renderPdf } from "./pdf/render";
 import { PROJECT_ROOT, isRelaxationMemoReady, readRelaxationMemo } from "./prompts";
-import { projectFile, sendCachedDocument } from "./staticDocs";
+import { projectFile, sendCachedDocument, sendCachedPhoto, withCachedPhoto } from "./staticDocs";
 
 // Гид «Азбука сна» — уходит каждому сразу после анкеты, пока готовится разбор.
 const GUIDE_PDF = "assets/guide/Drema_azbuka_sna.pdf";
@@ -1099,27 +1099,31 @@ async function resetToWelcomeAndSend(ctx: Context, session: Session) {
 // ── Анкета ───────────────────────────────────────────────────────────
 
 // Отправляет сообщение с картинкой, если она задана: текст уходит
-// подписью к фото. Если Telegram не смог скачать картинку (битая ссылка,
-// закрытый доступ) — не роняем анкету, шлём обычным текстом.
+// подписью к фото. Картинка — путь в репозитории; уходит с кэшем
+// file_id, иначе один и тот же файл заливался бы в Telegram заново на
+// каждого человека. Если отправить не удалось — не роняем анкету, шлём
+// обычным текстом.
 // asHtml включаем только для статических текстов из texts.ts. У вопросов
 // анкеты разметки нет, а угловая скобка в тексте вопроса сломала бы
 // отправку — поэтому они уходят как раньше, простым текстом.
 async function replyWithOptionalPhoto(
   ctx: Context,
   text: string,
-  photoUrl?: string,
+  photo?: string,
   markup?: InlineKeyboard,
   asHtml = false
 ) {
   const options = markup ? { reply_markup: markup } : {};
 
-  if (photoUrl) {
+  if (photo) {
     try {
-      return asHtml
-        ? await replyPhotoStatic(ctx, photoUrl, text, options)
-        : await ctx.replyWithPhoto(photoUrl, { ...options, caption: text });
-    } catch {
-      // падаем в обычную текстовую отправку ниже
+      return await withCachedPhoto(projectFile(photo), (file) =>
+        asHtml
+          ? replyPhotoStatic(ctx, file, text, options)
+          : ctx.replyWithPhoto(file, { ...options, caption: text })
+      );
+    } catch (error) {
+      console.error(`Не удалось отправить картинку ${photo}, шлю текстом:`, error);
     }
   }
   return asHtml ? replyStatic(ctx, text, options) : ctx.reply(text, options);
@@ -1151,7 +1155,7 @@ async function sendQuestionPrompt(
     markup = multiChoiceKeyboard(question.options, selected);
   }
 
-  return replyWithOptionalPhoto(ctx, questionTextWithCounter(question), question.photoUrl, markup);
+  return replyWithOptionalPhoto(ctx, questionTextWithCounter(question), question.photo, markup);
 }
 
 // Перерисовывает сообщение с вопросом после того, как пользователь нажал
@@ -1470,9 +1474,9 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
   // Картинка идёт отдельным сообщением и без подписи: текст относится к
   // гиду и уходит вместе с ним. Не отправилась — не страшно, главное
   // сообщение идёт следом.
-  await ctx
-    .replyWithPhoto(photos.questionnaireComplete)
-    .catch((error) => console.error("Не удалось отправить картинку после анкеты:", error));
+  await sendCachedPhoto(ctx, projectFile(photos.questionnaireComplete)).catch((error) =>
+    console.error("Не удалось отправить картинку после анкеты:", error)
+  );
 
   return sendGuideAfterQuiz(ctx, telegramId);
 }
