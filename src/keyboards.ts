@@ -35,10 +35,23 @@ export function multiChoiceKeyboard(options: string[], selected: string[]): Inli
 // Два шага: первое сообщение знакомит и ведёт ко второму, второе
 // отвечает «что вы получите» и уже предлагает начать.
 
+// Приветствие ведёт сразу к анкете, а «Как я работаю» — на экран трёх
+// шагов. Оба callback прежние: под старыми сообщениями в чатах висят
+// кнопки с теми же данными, и они должны вести туда же, куда новые.
 export function welcomeKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("Что я получу?", "welcome_value");
+  return new InlineKeyboard()
+    .text("Получить разбор", "start")
+    .row()
+    .text("Как я работаю", "how_it_works");
 }
 
+// «Мой подход» — единственная новая кнопка онбординга: прежний
+// how_it_works занят экраном трёх шагов.
+export function stepsKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("Начать", "start").row().text("Мой подход", "my_approach");
+}
+
+// Не в основном пути с 27.10.2026, см. texts.welcomeValue.
 export function welcomeValueKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("Начать", "start").row().text("Как я работаю", "how_it_works");
 }

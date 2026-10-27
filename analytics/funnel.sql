@@ -162,3 +162,52 @@ WHERE type = 'quiz_edit_answered'
   AND "telegramId" <> ALL(:internal_ids)
 GROUP BY "questionNumber"
 ORDER BY edits DESC;
+
+
+-- ── 7. Необязательные экраны онбординга ─────────────────────────────
+--
+-- Основной путь с 27.10.2026: приветствие → «Прежде чем начать». Эти
+-- два экрана в него не входят, человек заходит на них сам, и доля
+-- заходов показывает, многим ли коротких обещаний приветствия мало.
+--
+-- onb_welcome_value — прежний экран «Что я получу?». В основном пути
+-- его больше нет, остались только кнопки под старыми сообщениями;
+-- ненулевые значения здесь — это легаси, а не новый трафик.
+
+SELECT step,
+       COUNT(DISTINCT (e."telegramId", e.attempt)) AS attempts,
+       COUNT(DISTINCT e."telegramId")              AS people
+FROM (VALUES
+  ('welcome',       'onb_welcome'),
+  ('steps',         'onb_steps'),
+  ('how_it_works',  'onb_how_it_works'),
+  ('welcome_value (легаси)', 'onb_welcome_value')
+) AS s(step, type)
+JOIN "OfferEvent" e ON e.type = s.type::"OfferEventType"
+WHERE e.attempt IS NOT NULL
+  AND e."telegramId" <> ALL(:internal_ids)
+GROUP BY step
+ORDER BY people DESC;
+
+
+-- ── 8. Согласие на рассылку ─────────────────────────────────────────
+--
+-- С 27.10.2026 вопрос задаётся после анкеты, вместе с гайдом, а не в
+-- онбординге. Считаем долю согласившихся среди тех, кому вопрос
+-- показали: до переноса знаменателем был весь онбординг, и цифры до и
+-- после сравнивать нельзя.
+--
+-- Вопрос задаётся один раз в жизни, поэтому здесь нет attempt и нет
+-- DISTINCT по прохождениям — только люди.
+
+SELECT COUNT(DISTINCT CASE WHEN type = 'onb_marketing'     THEN "telegramId" END) AS asked,
+       COUNT(DISTINCT CASE WHEN type = 'onb_marketing_yes' THEN "telegramId" END) AS granted,
+       COUNT(DISTINCT CASE WHEN type = 'onb_marketing_no'  THEN "telegramId" END) AS declined,
+       ROUND(
+         100.0 * COUNT(DISTINCT CASE WHEN type = 'onb_marketing_yes' THEN "telegramId" END)
+         / NULLIF(COUNT(DISTINCT CASE WHEN type = 'onb_marketing' THEN "telegramId" END), 0),
+         1
+       ) AS granted_pct
+FROM "OfferEvent"
+WHERE type IN ('onb_marketing', 'onb_marketing_yes', 'onb_marketing_no')
+  AND "telegramId" <> ALL(:internal_ids);

@@ -75,6 +75,7 @@ import {
   offerPdfCardKeyboard,
   singleChoiceKeyboard,
   summaryKeyboard,
+  stepsKeyboard,
   welcomeKeyboard,
   welcomeValueKeyboard,
   backToQuizKeyboard,
@@ -220,6 +221,12 @@ export async function handleIncoming(ctx: Context) {
     return askPdConsentFirst(ctx, session);
   }
 
+  // Вопрос о рассылке приходит после анкеты и живёт в чате дальше:
+  // разбираем его до стадий, как оффер и предложение после покупки.
+  if (callbackData === "marketing_yes" || callbackData === "marketing_no") {
+    return handleMarketingAnswer(ctx, session, callbackData);
+  }
+
   if (callbackData?.startsWith("offer_")) {
     return handleOffer(ctx, session, callbackData);
   }
@@ -281,12 +288,16 @@ export async function handleIncoming(ctx: Context) {
       return goToTermsHealth(ctx, session);
     case "PD_CONSENT":
       return handlePdConsent(ctx, session, callbackData);
+    // Стадия прежнего онбординга. Кнопки разбираются выше, сюда
+    // доходит текст вместо нажатия — показываем вопрос заново.
     case "MARKETING_CONSENT":
-      return handleMarketingConsent(ctx, session, callbackData);
+      return sendMarketingConsent(ctx);
     case "WELCOME":
       return handleWelcome(ctx, session, callbackData, messageText);
     case "WELCOME_VALUE":
       return handleWelcomeValue(ctx, session, callbackData);
+    case "STEPS":
+      return handleSteps(ctx, session, callbackData);
     case "HOW_IT_WORKS":
       return handleHowItWorks(ctx, session, callbackData);
     case "QUESTION":
@@ -363,6 +374,8 @@ export async function resendCurrentStep(ctx: Context, session: Session) {
       return sendWelcome(ctx);
     case "WELCOME_VALUE":
       return sendWelcomeValue(ctx);
+    case "STEPS":
+      return sendSteps(ctx);
     case "HOW_IT_WORKS":
       return replyStatic(ctx, texts.howItWorks, {
         reply_markup: new InlineKeyboard().text("Начать", "start"),
@@ -698,13 +711,8 @@ async function afterTermsHealth(ctx: Context, session: Session) {
   // Без согласия на обработку данных дальше нельзя никому и никогда.
   if (state.PD_PROCESSING.action !== "GRANTED") return goToPdConsent(ctx, session);
 
-  // Про рассылку спрашиваем, только если человек ещё не отвечал. Отказ —
-  // это тоже ответ, и переспрашивать его неприлично.
-  const marketing = state.MARKETING.action;
-  if (marketing !== "GRANTED" && marketing !== "DECLINED") {
-    return goToMarketingConsent(ctx, session);
-  }
-
+  // Про рассылку здесь больше не спрашиваем: вопрос переехал за анкету,
+  // чтобы не стоять между человеком и первым вопросом.
   return startQuestionnaire(ctx, session);
 }
 
@@ -813,23 +821,46 @@ async function handleWelcome(
   // знакомиться, в том числе тот, кто застал прежнее приветствие.
   if (messageText === "/start") return sendWelcome(ctx);
 
-  // Кнопки прежнего приветствия: до 15.10.2026 они висели на первом
-  // сообщении, и в чатах они остались. Пусть работают.
+  // «Получить разбор» и «Как я работаю» — кнопки нового приветствия.
+  // Те же callback висят под старыми сообщениями в чатах, и ведут они
+  // теперь туда же: «Как я работаю» — на экран трёх шагов.
   if (callbackData === "start") return goToTermsHealth(ctx, session);
-  if (callbackData === "how_it_works") return goToHowItWorks(ctx, session);
+  if (callbackData === "how_it_works") return goToSteps(ctx, session);
 
-  // Написал текстом вместо нажатия. Обычно повторяем текущий шаг, но
-  // тому, кто нового приветствия ещё не видел, показываем сразу второе
-  // сообщение: он застал прежнее, где кнопки «Начать» и «Как я работаю»
-  // висели на первом, и ждёт именно их.
-  if (await hasOnboardingEvent(ctx.from!.id, "onb_welcome")) return sendWelcome(ctx);
-  return goToWelcomeValue(ctx, session);
+  // Написал текстом вместо нажатия — показываем приветствие заново.
+  return sendWelcome(ctx);
 }
 
+// Экран не в основном пути с 27.10.2026, но стадия жива: на ней стоят
+// те, кто открыл его старой кнопкой. «Как я работаю» отсюда ведёт на
+// экран трёх шагов, как и с приветствия.
 async function handleWelcomeValue(ctx: Context, session: Session, callbackData?: string) {
   if (callbackData === "start") return goToTermsHealth(ctx, session);
-  if (callbackData === "how_it_works") return goToHowItWorks(ctx, session);
+  if (callbackData === "how_it_works") return goToSteps(ctx, session);
   return sendWelcomeValue(ctx);
+}
+
+// Три шага до плана. Необязательный экран: в основной путь не входит,
+// на него уводит «Как я работаю» с приветствия.
+async function sendSteps(ctx: Context) {
+  await logOnboarding(ctx.from!.id, "onb_steps");
+  return replyStatic(ctx, texts.steps, { reply_markup: stepsKeyboard() });
+}
+
+async function goToSteps(ctx: Context, session: Session) {
+  // Кнопки приветствия убираем: на них не нужно нажимать второй раз.
+  await dropKeyboard(ctx);
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "STEPS" },
+  });
+  return sendSteps(ctx);
+}
+
+async function handleSteps(ctx: Context, session: Session, callbackData?: string) {
+  if (callbackData === "start") return goToTermsHealth(ctx, session);
+  if (callbackData === "my_approach") return goToHowItWorks(ctx, session);
+  return sendSteps(ctx);
 }
 
 async function goToHowItWorks(ctx: Context, session: Session) {
@@ -1015,7 +1046,8 @@ async function handlePdConsent(ctx: Context, session: Session, callbackData?: st
 
     await logOfferEvent(session.telegramId, granted ? "onb_pd_granted" : "onb_pd_declined");
     await dropKeyboard(ctx);
-    if (granted) return goToMarketingConsent(ctx, session);
+    // Сразу в анкету: про рассылку спросим после неё.
+    if (granted) return afterConsents(ctx, session);
 
     // Стадию не меняем: /start после отказа должен вернуть к этому же
     // экрану, а не показывать приветствие заново.
@@ -1041,37 +1073,61 @@ async function sendMarketingConsent(ctx: Context) {
   });
 }
 
-async function goToMarketingConsent(ctx: Context, session: Session) {
-  await prisma.session.update({
-    where: { telegramId: session.telegramId },
-    data: { stage: "MARKETING_CONSENT" },
-  });
-  return sendMarketingConsent(ctx);
-}
+// Ответ на вопрос о рассылке.
+//
+// Разбирается до стадий и стадию не меняет: вопрос приходит после
+// анкеты, и к моменту нажатия человек может уже ждать разбор, читать
+// оффер или начать новое прохождение. Привязывать ответ к стадии
+// значит потерять его у всех, кто нажал не сразу.
+async function handleMarketingAnswer(ctx: Context, session: Session, callbackData: string) {
+  const granted = callbackData === "marketing_yes";
 
-async function handleMarketingConsent(ctx: Context, session: Session, callbackData?: string) {
-  if (callbackData === "marketing_yes" || callbackData === "marketing_no") {
-    const granted = callbackData === "marketing_yes";
-    const saved = await saveConsent(ctx, {
-      telegramId: session.telegramId,
-      type: "MARKETING",
-      action: granted ? "GRANTED" : "DECLINED",
-      source: "ONBOARDING",
-      documents: ["MARKETING_CONSENT"],
-      messageText: marketingConsentText(),
-      buttonText: granted ? MARKETING_YES : MARKETING_NO,
-      telegramMessageId: ctx.callbackQuery?.message?.message_id,
-    });
-    if (!saved) return;
-
-    await logOfferEvent(session.telegramId, granted ? "onb_marketing_yes" : "onb_marketing_no");
-    await dropKeyboard(ctx);
-    // Отказ от рассылки ни на что, кроме рассылок, не влияет: дальше
-    // оба ответа ведут одинаково.
-    return afterConsents(ctx, session);
+  // Нажали второй раз или вернулись к старому сообщению: ответ уже в
+  // журнале, второй записи там быть не должно. Клавиатуру всё равно
+  // убираем — иначе кнопки выглядят живыми.
+  const current = await getConsent(session.telegramId, "MARKETING");
+  if (current.action === "GRANTED" || current.action === "DECLINED") {
+    return dropKeyboard(ctx);
   }
 
-  return sendMarketingConsent(ctx);
+  const saved = await saveConsent(ctx, {
+    telegramId: session.telegramId,
+    type: "MARKETING",
+    action: granted ? "GRANTED" : "DECLINED",
+    source: "ONBOARDING",
+    documents: ["MARKETING_CONSENT"],
+    messageText: marketingConsentText(),
+    buttonText: granted ? MARKETING_YES : MARKETING_NO,
+    telegramMessageId: ctx.callbackQuery?.message?.message_id,
+  });
+  if (!saved) return;
+
+  await logOfferEvent(session.telegramId, granted ? "onb_marketing_yes" : "onb_marketing_no");
+  await dropKeyboard(ctx);
+
+  // Переходный случай: человек стоит на экране рассылки прежнего
+  // онбординга, и для него этот ответ — последний шаг перед анкетой.
+  if (session.stage === "MARKETING_CONSENT") return afterConsents(ctx, session);
+
+  return replyStatic(ctx, granted ? texts.marketingThanksYes : texts.marketingThanksNo);
+}
+
+// Вопрос о рассылке после завершённой анкеты.
+//
+// Спрашиваем один раз в жизни: отказ — это тоже ответ. Привязан к концу
+// анкеты, а не к отправке гайда: гайд уходит один раз на человека, и на
+// втором прохождении вопрос не достался бы тому, кто ещё не отвечал.
+//
+// Молчит при любой ошибке: это последнее сообщение в цепочке после
+// анкеты, и ронять из-за него гайд и разбор нельзя.
+async function askMarketingAfterQuiz(ctx: Context, telegramId: bigint) {
+  try {
+    const current = await getConsent(telegramId, "MARKETING");
+    if (current.action === "GRANTED" || current.action === "DECLINED") return;
+    await sendMarketingConsent(ctx);
+  } catch (error) {
+    console.error("Не удалось спросить про рассылку после анкеты:", error);
+  }
 }
 
 // Куда идти после согласий: новичок начинает анкету, а тот, кому экраны
@@ -1114,6 +1170,7 @@ async function startQuestionnaire(ctx: Context, session: Session) {
 const ONBOARDING_STAGES: Session["stage"][] = [
   "WELCOME",
   "WELCOME_VALUE",
+  "STEPS",
   "HOW_IT_WORKS",
   "TERMS",
   "TERMS_HEALTH",
@@ -1128,6 +1185,7 @@ const ONBOARDING_CALLBACKS = new Set([
   "welcome_value",
   "start",
   "how_it_works",
+  "my_approach",
   "health_ok",
   "health_stop",
   "health_guide",
@@ -1558,7 +1616,11 @@ async function finishQuestionnaire(ctx: Context, telegramId: bigint) {
     console.error("Не удалось отправить картинку после анкеты:", error)
   );
 
-  return sendGuideAfterQuiz(ctx, telegramId);
+  await sendGuideAfterQuiz(ctx, telegramId);
+
+  // Последним в цепочке: сначала человек получает обещанное, и только
+  // потом его о чём-то просят.
+  return askMarketingAfterQuiz(ctx, telegramId);
 }
 
 // Азбуку обещает приветствие, поэтому её получает каждый, кто дошёл до
@@ -2212,6 +2274,7 @@ type OfferEventName =
   | "offer_declined"
   | "onb_welcome"
   | "onb_welcome_value"
+  | "onb_steps"
   | "onb_how_it_works"
   | "onb_terms"
   | "onb_health"
