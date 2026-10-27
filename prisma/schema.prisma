@@ -582,6 +582,9 @@ enum OfferEventType {
   menu_team
   restart_asked
   restart_confirmed
+  // Возврат через /start, когда анкета уже пройдена: новое
+  // прохождение заводится молча, подтверждать нечего.
+  start_new_attempt
   // Подтверждение с отменой ждавшего разбора. Отдельным событием, а не
   // полем: п.8 ТЗ просит видеть, сколько перезапусков обнулили разбор.
   restart_confirmed_cancelled_draft

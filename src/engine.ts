@@ -80,7 +80,7 @@ import {
   backToQuizKeyboard,
   restartConfirmKeyboard,
 } from "./keyboards";
-import type { Session } from "@prisma/client";
+import type { Session, Stage } from "@prisma/client";
 import {
   answersOfCurrentAttempt,
   currentAttempt,
@@ -266,6 +266,7 @@ export async function handleIncoming(ctx: Context) {
   // не в resendCurrentStep: тот же повтор вопроса делает кнопка
   // «Вернуться к анкете», и ей объяснять нечего.
   if (messageText && looksLikeCommand(messageText)) {
+    if (isStartCommand(messageText)) return handleStartCommand(ctx, session);
     if (inQuestionnaire(session)) await replyStatic(ctx, texts.startDuringQuiz);
     return resendCurrentStep(ctx, session);
   }
@@ -431,7 +432,6 @@ async function handleMenuCallback(ctx: Context, session: Session, callbackData: 
 
   switch (callbackData) {
     case "menu_restart":
-      await logOfferEvent(session.telegramId, "restart_asked");
       return askRestart(ctx, session);
     case "menu_support":
       await logOfferEvent(session.telegramId, "menu_support");
@@ -489,7 +489,6 @@ export async function handleMenuCommand(ctx: Context, which: MenuCommand) {
       await logOfferEvent(session.telegramId, "menu_team");
       return sendTeam(ctx, back);
     case "restart":
-      await logOfferEvent(session.telegramId, "restart_asked");
       return askRestart(ctx, session);
   }
 }
@@ -497,7 +496,58 @@ export async function handleMenuCommand(ctx: Context, which: MenuCommand) {
 // Подтверждение перезапуска. Предупреждение про готовящийся разбор
 // встаёт перед кнопками: человек должен узнать о потере до того, как
 // нажмёт, а не после.
+// Есть ли в текущем прохождении хоть один ответ. По этому и решаем,
+// нужно ли новое прохождение: пустое заводить незачем.
+async function hasAnswersInAttempt(telegramId: bigint): Promise<boolean> {
+  const answers = await prisma.answer.count({
+    where: await answersOfCurrentAttempt(telegramId),
+  });
+  return answers > 0;
+}
+
+// Стадии, на которых человеку есть что терять: анкета не дошла до
+// конца, и новое прохождение стёрло бы работу, которую он уже сделал.
+// Здесь /start спрашивает, а не действует.
+const UNFINISHED_STAGES: Stage[] = [
+  "QUESTION",
+  "EDIT_ANSWER",
+  "SUMMARY_REVIEW",
+  "EDIT_PICK_QUESTION",
+  "EDIT_MORE",
+];
+
+// /start.
+//
+// Команда означает «начать сначала», и показывать по ней текущий экран
+// значит не ответить на просьбу. Но начать сначала — это новое
+// прохождение, иначе новые ответы легли бы поверх старых внутри одного
+// и того же, и брошенная на середине анкета дала бы разбор по смеси
+// (см. beginNewAttempt).
+//
+// Поэтому три исхода, и выбор между ними — по тому, что человек теряет:
+// идёт анкета или ждёт разбор — спрашиваем; прохождение завершено —
+// заводим новое молча; ответов ещё нет — просто приветствие.
+async function handleStartCommand(ctx: Context, session: Session) {
+  if (UNFINISHED_STAGES.includes(session.stage)) return askRestart(ctx, session);
+
+  // Разбор ещё не отправлен: новое прохождение его отменит, и человек
+  // должен об этом узнать до, а не после. Текст предупреждения
+  // подставит сам askRestart.
+  if (await pendingRecommendation(session.telegramId)) return askRestart(ctx, session);
+
+  if (await hasAnswersInAttempt(session.telegramId)) {
+    await beginNewAttempt(session, "start");
+  }
+
+  return sendWelcome(ctx);
+}
+
+// Событие пишется здесь, а не у вызывающих: экран подтверждения
+// открывается из меню, по /restart и по /start, и забытая разметка в
+// одном из трёх мест дала бы в /stats «подтвердили больше, чем
+// спросили».
 async function askRestart(ctx: Context, session: Session) {
+  await logOfferEvent(session.telegramId, "restart_asked");
   const pending = await pendingRecommendation(session.telegramId);
   const text = pending
     ? `${texts.restartConfirm}\n\n${texts.restartPendingWarning}`
@@ -547,15 +597,33 @@ async function confirmRestart(ctx: Context, session: Session) {
   // экране нового прохождения и ответить ещё ничего не успел. Второй
   // раз номер прохождения не увеличиваем, иначе в базе появились бы
   // пустые прохождения, а в /stats — лишние перезапуски.
-  if (session.stage === "TERMS_HEALTH") {
-    const answers = await prisma.answer.count({
-      where: await answersOfCurrentAttempt(telegramId),
-    });
-    if (!answers) {
-      await replaceConfirmMessage(ctx, texts.restartStarted);
-      return sendTermsHealth(ctx);
-    }
+  if (session.stage === "WELCOME" && !(await hasAnswersInAttempt(telegramId))) {
+    await replaceConfirmMessage(ctx, texts.restartStarted);
+    return sendWelcome(ctx);
   }
+
+  await beginNewAttempt(session, "restart");
+  await replaceConfirmMessage(ctx, texts.restartStarted);
+
+  // Дальше путь онбординга с самого начала. Экран «Прежде чем начать»
+  // человек увидит снова — состояние малыша могло измениться, — а
+  // согласия, на которые ответ уже есть, пропустятся сами.
+  return sendWelcome(ctx);
+}
+
+// Заводит новое прохождение. Ничего не удаляет: прошлое остаётся в
+// базе, просто перестаёт попадать в новый разбор (см. attempt.ts).
+//
+// Общая часть двух путей: подтверждённого перезапуска и молчаливого
+// возврата через /start, когда терять нечего. Отдельной функцией,
+// потому что забыть здесь любую строку — значит получить прохождение,
+// которое тащит за собой хвост прошлого: невыключенные напоминания,
+// недосброшенный номер вопроса или разбор, который придёт по уже
+// переписанным ответам.
+type NewAttemptReason = "restart" | "start";
+
+async function beginNewAttempt(session: Session, reason: NewAttemptReason) {
+  const telegramId = session.telegramId;
 
   // Разбор, который ждал проверки, не придёт: он про ответы, которые
   // человек сейчас перепишет. Отменяем до смены номера прохождения,
@@ -575,11 +643,13 @@ async function confirmRestart(ctx: Context, session: Session) {
   // Номер прохождения передаём явно: это событие закрывает прежнее
   // прохождение, а не открывает новое. Полагаться на то, что сессию
   // увеличат строкой ниже, а не выше, слишком хрупко.
-  await logOfferEvent(
-    telegramId,
-    pending ? "restart_confirmed_cancelled_draft" : "restart_confirmed",
-    { attempt: session.attempt }
-  );
+  const event =
+    reason === "start"
+      ? "start_new_attempt"
+      : pending
+        ? "restart_confirmed_cancelled_draft"
+        : "restart_confirmed";
+  await logOfferEvent(telegramId, event, { attempt: session.attempt });
 
   // Напоминания прошлого прохождения больше не нужны: у нового будут
   // свои, и начнутся они с показа первого вопроса.
@@ -589,7 +659,7 @@ async function confirmRestart(ctx: Context, session: Session) {
     where: { telegramId },
     data: {
       attempt: { increment: 1 },
-      stage: "TERMS_HEALTH",
+      stage: "WELCOME",
       status: "onboarding",
       currentQuestionNumber: null,
       resumeStage: null,
@@ -597,12 +667,6 @@ async function confirmRestart(ctx: Context, session: Session) {
       yellowFlags: [],
     },
   });
-
-  await replaceConfirmMessage(ctx, texts.restartStarted);
-
-  // Дальше путь онбординга без приветствия: экран «Прежде чем начать»
-  // показывается снова, потому что состояние малыша могло измениться.
-  return sendTermsHealth(ctx);
 }
 
 // Куда идти после «Прежде чем начать».
@@ -646,6 +710,12 @@ async function afterTermsHealth(ctx: Context, session: Session) {
 // вовсе: grammY разбирает их раньше общего обработчика текста.
 function looksLikeCommand(text: string): boolean {
   return /^\/[A-Za-z0-9_]+(@[A-Za-z0-9_]+)?(\s|$)/.test(text);
+}
+
+// Та же форма, что у looksLikeCommand: имя бота после «@» Telegram
+// добавляет сам в группах, а параметр deep-link идёт через пробел.
+function isStartCommand(text: string): boolean {
+  return /^\/start(@[A-Za-z0-9_]+)?(\s|$)/.test(text);
 }
 
 // ── Закрытый режим ──────────────────────────────────────────────────
@@ -2150,6 +2220,7 @@ type OfferEventName =
   | "menu_team"
   | "restart_asked"
   | "restart_confirmed"
+  | "start_new_attempt"
   | "restart_confirmed_cancelled_draft"
   | "restart_cancelled"
   // Полная разметка воронки, 20.10.2026.
