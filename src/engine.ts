@@ -258,7 +258,15 @@ export async function handleIncoming(ctx: Context) {
 
   // Команда, которую бот не знает. Ответом на вопрос анкеты она быть не
   // может: показываем текущий экран заново и ничего не сохраняем.
+  //
+  // Посреди анкеты сюда почти всегда приходит /start, и человек жмёт её,
+  // чтобы начать сначала. Один и тот же вопрос в ответ выглядит так,
+  // будто бот не услышал, — поэтому сначала объясняем, где он
+  // остановился и какая команда начинает заново. Приписка живёт здесь, а
+  // не в resendCurrentStep: тот же повтор вопроса делает кнопка
+  // «Вернуться к анкете», и ей объяснять нечего.
   if (messageText && looksLikeCommand(messageText)) {
+    if (inQuestionnaire(session)) await replyStatic(ctx, texts.startDuringQuiz);
     return resendCurrentStep(ctx, session);
   }
 
@@ -388,6 +396,27 @@ export async function resendCurrentStep(ctx: Context, session: Session) {
       return replyStatic(ctx, texts.csatPrompt, { reply_markup: csatKeyboard() });
     case "CSAT_FEEDBACK":
       return replyStatic(ctx, texts.csatFeedbackPrompt);
+    case "CONSULT_CONSENT":
+      // То же, что и на обычный текст в этой стадии: напоминаем про
+      // контакт один раз.
+      return remindAboutConsentOnce(ctx, session);
+    case "AWAITING_RECOMMENDATION":
+      // Падать в обработчик стадии нельзя: он сохранил бы «/start»
+      // дополнением к анкете.
+      return replyStatic(ctx, texts.startWhileAnalysisPending);
+    // Сценарий кончился: повторять нечего. Молчать тоже нельзя — бот
+    // выглядел бы мёртвым ровно тогда, когда человек вернулся сам.
+    // Ведём в /restart, а не сбрасываем на приветствие: сброс начал бы
+    // новую анкету внутри старой попытки, и новые ответы легли бы
+    // вперемешку с прошлыми.
+    case "CSAT_DONE":
+    case "DECLINED":
+    case "OUT_OF_RANGE":
+    case "RED_FLAG_ENDED":
+    // Стадия не используется с 15.10.2026, но сессия могла в ней
+    // застрять: без этой ветки она не отвечает ни на что.
+    case "DECLINE_REASON":
+      return replyStatic(ctx, texts.startAfterFinish);
     default:
       return;
   }
