@@ -151,7 +151,7 @@ Railway выдаст адрес вида `drema-bot-production.up.railway.app` �
 | `FREE_ANALYSIS_FEEDBACK_DELAY_HOURS` | через сколько часов после разбора спросить «узнали своего малыша?» (по умолчанию `24`) |
 | `PDF_FEEDBACK_DELAY_DAYS` | через сколько дней после плана спросить «как сейчас сон?» (по умолчанию `7`) |
 | `FEEDBACK_WINDOW_START` / `FEEDBACK_WINDOW_END` | часы по Москве, в которые такие вопросы можно отправлять (по умолчанию `10` и `21`) |
-| `MAIN_BOT_USERNAME` | username основного бота без «@» (по умолчанию `drema_sleep_bot`) |
+| `MAIN_BOT_USERNAME` | username основного бота без «@» (по умолчанию `dremius_sleep_bot`) |
 | `ALLOWED_USER_IDS` | закрытый режим: id через запятую. Пусто — бот открыт для всех |
 | `SUPPORT_BOT_TOKEN` | токен бота поддержки. Не задан — поддержка не запускается |
 | `SUPPORT_ADMIN_IDS` | кто может привязать группу и отвечать, через запятую (по умолчанию `ADMIN_TELEGRAM_ID`) |
