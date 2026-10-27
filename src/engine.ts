@@ -42,7 +42,7 @@ import { PROJECT_ROOT, isRelaxationMemoReady, readRelaxationMemo } from "./promp
 import { projectFile, sendCachedDocument, sendCachedPhoto, withCachedPhoto } from "./staticDocs";
 
 // Гид «Азбука сна» — уходит каждому сразу после анкеты, пока готовится разбор.
-const GUIDE_PDF = "assets/guide/Drema_azbuka_sna.pdf";
+const GUIDE_PDF = "assets/guide/Dremius_azbuka_sna.pdf";
 import { orderUrl } from "./web/server";
 import {
   QUESTIONS,
