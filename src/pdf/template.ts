@@ -1,13 +1,14 @@
 // Вёрстка платного PDF: HTML и CSS, перенесённые из прототипа
-// templates/pdf/reference_build.py. Прототип остаётся образцом дизайна:
+// templates/pdf/reference_dremius.py. Прототип остаётся образцом дизайна:
 // если тут что-то меняется, сверяться нужно с ним и с готовым примером
-// assets/example/Drema_plan_sna_primer.pdf.
+// assets/example/Dremius_plan_sna_primer.pdf.
 //
 // Документ собирается тремя кусками, потому что у них разные страничные
 // настройки: обложка и финал — во всю страницу без полей, содержание —
 // с полями и колонтитулом. Chromium умеет только один набор полей на
 // документ, поэтому куски рендерятся отдельно и склеиваются
-// (см. src/pdf/render.ts).
+// (см. src/pdf/render.ts). Там же под страницы с полями подкладывается
+// фон цвета бумаги: поля Chromium всегда печатает белыми.
 
 import fs from "fs";
 import path from "path";
@@ -21,23 +22,50 @@ import { PROJECT_ROOT } from "../prompts";
 // Шрифты вшиваются в CSS как data-URI, а не подключаются файлами: тогда
 // страницу можно отдать браузеру строкой, без временных файлов и возни
 // с относительными путями. Читаются один раз при старте.
-function fontFace(family: string, file: string, style: "normal" | "italic"): string {
-  const full = path.join(PROJECT_ROOT, "assets/fonts", file);
-  const base64 = fs.readFileSync(full).toString("base64");
+//
+// Начертания лежат отдельными файлами на каждый вес и каждый алфавит, а
+// не одним переменным шрифтом: кириллица и латиница подключаются своими
+// unicode-range, и в документ попадает только то, что в нём встречается.
+// Без такого деления один Onest со всеми алфавитами весил бы больше, чем
+// все шестнадцать файлов вместе.
+const CYRILLIC = "U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116";
+const LATIN = "U+0000-00FF,U+2000-206F,U+20AC,U+2122,U+2190-2199,U+2212";
+
+function fontFace(family: string, slug: string, subset: string, weight: number): string {
+  const file = path.join(PROJECT_ROOT, "assets/fonts", `${slug}-${subset}-${weight}-normal.woff2`);
+  const base64 = fs.readFileSync(file).toString("base64");
   return `@font-face {
   font-family: "${family}";
-  src: url(data:font/ttf;base64,${base64}) format("truetype");
-  font-weight: 100 900;
-  font-style: ${style};
+  font-weight: ${weight};
+  font-style: normal;
   font-display: block;
+  src: url(data:font/woff2;base64,${base64}) format("woff2");
+  unicode-range: ${subset === "cyrillic" ? CYRILLIC : LATIN};
 }`;
 }
 
 const FONTS = [
-  fontFace("Lora", "Lora-Variable.ttf", "normal"),
-  fontFace("Lora", "Lora-Italic-Variable.ttf", "italic"),
-  fontFace("Inter", "Inter-Variable.ttf", "normal"),
-].join("\n");
+  ["Rubik", "rubik"],
+  ["Onest", "onest"],
+]
+  .flatMap(([family, slug]) =>
+    [400, 500, 600, 700].flatMap((weight) =>
+      ["cyrillic", "latin"].map((subset) => fontFace(family, slug, subset, weight))
+    )
+  )
+  .join("\n");
+
+// ── Картинки ────────────────────────────────────────────────────────
+
+// Персонаж появляется только на обложке и финальной странице: в Частях
+// 1–3 приоритет у информации, это правило брендбука.
+function imageUri(file: string, mime: string): string {
+  const full = path.join(PROJECT_ROOT, "assets/pdf", file);
+  return `data:${mime};base64,${fs.readFileSync(full).toString("base64")}`;
+}
+
+const COVER_IMAGE = imageUri("dremius-cloud.png", "image/png");
+const FINAL_IMAGE = imageUri("dremius-final.png", "image/png");
 
 // ── Разметка из промптов ────────────────────────────────────────────
 
@@ -83,11 +111,44 @@ function markdown(text: string): string {
   return out.join("\n");
 }
 
+// ── Иконки ──────────────────────────────────────────────────────────
+
+// Простые line-иконки с мягкими окончаниями: шапки разделов и строки
+// режима. Рисуем разметкой, а не картинками, — цвет задаётся из CSS и
+// не нужно таскать файлы ради пяти значков.
+const ICON_PATHS: Record<string, string> = {
+  loupe: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
+  moon: '<path d="M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z"/>',
+  star: '<path d="M12 3.5l2.4 5.1 5.6.7-4.1 3.9 1 5.5L12 16l-4.9 2.7 1-5.5L4 9.3l5.6-.7z"/>',
+  heart: '<path d="M12 19.5s-7-4.3-7-9.4A3.9 3.9 0 0 1 12 7.6a3.9 3.9 0 0 1 7 2.5c0 5.1-7 9.4-7 9.4z"/>',
+  sun:
+    '<circle cx="12" cy="12" r="4"/>' +
+    '<path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4"/>',
+};
+
+function icon(name: string, cls = "ic"): string {
+  return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" ` +
+    `stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name]}</svg>`;
+}
+
+// Звезда над «ё» в логотипе: вместо двух точек. Цвет вшит в разметку —
+// это часть знака, а не оформление текста.
+const WORDMARK_STAR =
+  '<svg class="wm-star" viewBox="0 0 24 24">' +
+  '<path d="M12 2.5l2.6 5.6 6.1.8-4.5 4.2 1.1 6-5.3-3-5.3 3 1.1-6L3.3 8.9l6.1-.8z" fill="#F3B17E"/></svg>';
+
+const WORDMARK = `<div class="wm">Др<span class="yo">е${WORDMARK_STAR}</span>миус</div>`;
+
 // ── Таблица режима ──────────────────────────────────────────────────
 
 type RowKind = "wake" | "sleep" | "calm" | "night";
 
-const ICONS: Record<RowKind, string> = { wake: "☀", sleep: "☾", calm: "✦", night: "★" };
+const ROW_ICON: Record<RowKind, string> = {
+  wake: "sun",
+  sleep: "moon",
+  calm: "heart",
+  night: "star",
+};
 
 // Цвет строки и значок зависят от того, что это за событие. В прототипе
 // вид был задан руками, а P1 отдаёт только время, событие и
@@ -106,13 +167,13 @@ function scheduleTable(variant: ScheduleVariant): string {
   const rows = variant.rows
     .map((row) => {
       const kind = rowKind(row.event);
-      const duration = row.duration ? `<span class="d">${escapeHtml(row.duration)}</span>` : "";
-      return `<tr class="${kind}"><td class="t">${escapeHtml(row.time)}</td>` +
-        `<td class="i">${ICONS[kind]}</td>` +
-        `<td class="e">${escapeHtml(row.event)}${duration}</td></tr>`;
+      const duration = row.duration ? `<span>${escapeHtml(row.duration)}</span>` : "";
+      return `<div class="row ${kind}"><div class="t">${escapeHtml(row.time)}</div>` +
+        `${icon(ROW_ICON[kind], "ri")}` +
+        `<div class="e">${escapeHtml(row.event)}${duration}</div></div>`;
     })
     .join("");
-  return `<table class="sched">${rows}</table>`;
+  return `<div class="sched">${rows}</div>`;
 }
 
 // Вариантов может быть два — при переходе на меньшее число снов.
@@ -125,16 +186,10 @@ function scheduleBlock(variants: ScheduleVariant[]): string {
     .join("");
 }
 
-// ── Страницы ────────────────────────────────────────────────────────
+// ── Фиксированные тексты ────────────────────────────────────────────
 
-const CLOUD = `<svg viewBox="0 0 200 130" class="cloud" aria-hidden="true">
-<defs><radialGradient id="g" cx="50%" cy="45%" r="60%"><stop offset="0" stop-color="#FFF6E6"/><stop offset="1" stop-color="#F3C99A"/></radialGradient>
-<filter id="glow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="9"/></filter></defs>
-<g filter="url(#glow)" opacity=".55"><ellipse cx="100" cy="78" rx="92" ry="52" fill="#F3C99A"/></g>
-<path d="M45 112c-22 0-36-15-36-33 0-17 13-31 30-32 5-21 23-36 44-36 18 0 33 10 40 25 4-2 9-3 14-3 21 0 37 17 37 38 0 23-17 41-40 41z" fill="url(#g)"/>
-<circle cx="80" cy="72" r="5" fill="#1B1A3A"/><circle cx="120" cy="72" r="5" fill="#1B1A3A"/>
-<path d="M90 86q10 8 20 0" stroke="#1B1A3A" stroke-width="3.5" fill="none" stroke-linecap="round"/>
-<circle cx="68" cy="86" r="7" fill="#E3A598" opacity=".55"/><circle cx="132" cy="86" r="7" fill="#E3A598" opacity=".55"/></svg>`;
+const BRAND = "Дрёмиус";
+const DESCRIPTOR = "ваш помощник по детскому сну";
 
 const COVER_DISCLAIMER =
   "Этот план носит информационный характер и не является медицинской консультацией. " +
@@ -142,7 +197,7 @@ const COVER_DISCLAIMER =
   "ответам в анкете. Если вас беспокоит здоровье малыша, обратитесь к педиатру.";
 
 const FINAL_DISCLAIMER =
-  "<b>Важно.</b> Материалы Дрёмы носят исключительно информационный характер. Они составлены " +
+  "<b>Важно.</b> Материалы Дрёмиуса носят исключительно информационный характер. Они составлены " +
   "на основе общедоступных рекомендаций о детском сне и подобраны с учётом ваших ответов в анкете. " +
   "Это не медицинская консультация, не диагноз и не назначение лечения, и они не заменяют осмотр " +
   "врача. Решения о режиме и уходе за малышом принимаете вы. Если малыш болеет, вы заметили " +
@@ -172,64 +227,101 @@ function contacts(): string {
   return lines.join("<br>");
 }
 
+// ── Стили ───────────────────────────────────────────────────────────
+//
+// Теней в содержательных страницах нет намеренно: Chromium при печати
+// разрезает их по границе страницы и переносит обрывок на следующую.
+// Мягкость даётся скруглениями, а свечение остаётся только на обложке и
+// финальной странице — они печатаются отдельными кусками в одну
+// страницу каждая, и переносить там нечего.
+
 const CSS = `
 ${FONTS}
-:root { --navy:#1B1A3A; --navy2:#2A2852; --cream:#FBF4E8; --peach:#F3C99A; --pink:#E3A598; --lav:#8C7BB8; --ink:#2B2A3F; --muted:#6E6A82; }
+:root {
+  --night:#10182F; --indigo:#3E4F7C; --lav:#9D92B6; --cream:#FFF1D9;
+  --apricot:#F3B17E; --blush:#EAC9CA; --paper:#FFF8EE; --ink:#1D2540;
+  --muted:#5F6683; --line:#E9DFCF; --tint:#EEEBF4;
+}
 * { box-sizing: border-box; }
-body { margin:0; font-family: Inter, "Noto Color Emoji", sans-serif; color: var(--ink); font-size: 10.6pt; line-height: 1.55; }
-h1,h2,h3,.serif { font-family: Lora, "Noto Color Emoji", serif; }
-.page { position: relative; page-break-after: always; background: #fff; }
-.full { width: 210mm; height: 297mm; overflow:hidden; }
+html { background: var(--paper); }
+body { margin:0; font-family: Onest, "Noto Color Emoji", sans-serif; color: var(--ink); font-size: 10.6pt; line-height: 1.6; background: var(--paper); }
+h1,h2,h3,.rub { font-family: Rubik, "Noto Color Emoji", sans-serif; }
+.page { position: relative; page-break-after: always; }
 .page:last-child { page-break-after: auto; }
-.cover .bottom { display:flex; flex-direction:column; }
-.cover { background: radial-gradient(120% 80% at 50% 38%, #34306A 0%, var(--navy) 62%); color: var(--cream); display:flex; flex-direction:column; justify-content:space-between; padding: 26mm 22mm; }
-.cover .brand { font-family: Lora, serif; font-size: 22pt; color: var(--peach); letter-spacing:.5px; }
-.cover .brand small { display:block; font-family: Inter; font-size: 9.5pt; color:#CFC7E8; letter-spacing:.3px; margin-top:2px; }
-.cover .cloud { width: 92mm; display:block; margin: 0 auto; }
-.cover h1 { font-size: 30pt; line-height:1.15; margin: 0 0 6mm; font-weight: 500; color:#FFF6E6; }
-.cover .sub { color:#CFC7E8; font-size: 11pt; max-width: 125mm; }
-.cover .meta { display:flex; justify-content:space-between; color:#A9A1CC; font-size: 9pt; border-top: 1px solid rgba(207,199,232,.25); padding-top: 5mm; }
-.star { position:absolute; color: var(--peach); opacity:.75; }
-.kicker { font-size: 8.5pt; text-transform: uppercase; letter-spacing: 1.6px; color: var(--lav); font-weight: 600; margin-bottom: 2mm; }
-.ptitle { font-size: 21pt; margin: 0 0 7mm; color: var(--navy); font-weight: 500; }
-h2 { font-size: 14pt; color: var(--navy); margin: 7mm 0 2.5mm; font-weight: 600; break-after: avoid; }
-h2:first-child { margin-top: 0; }
-h3 { font-size: 11.5pt; color: var(--navy); margin: 5mm 0 1.5mm; font-weight: 600; padding-left: 4mm; border-left: 3px solid var(--peach); break-after: avoid; }
-li { break-inside: avoid; } ul.short { break-inside: avoid; }
-p { margin: 0 0 2.6mm; } ul { margin: 0 0 3mm; padding-left: 5mm; } li { margin-bottom: 1.6mm; } li::marker { color: var(--pink); }
-.rec h2:first-of-type + p { background: var(--cream); border-radius: 4mm; padding: 4.5mm 5mm; font-size: 11pt; }
-.intro { background: var(--cream); border-radius: 4mm; padding: 4.5mm 5mm; margin-bottom: 7mm; }
-.sched { width:100%; border-collapse: separate; border-spacing: 0 2.5mm; }
-.sched td { padding: 4mm 4mm; background:#F6F3FB; }
-.sched td:first-child { border-radius: 3mm 0 0 3mm; } .sched td:last-child { border-radius: 0 3mm 3mm 0; }
-.sched .t { font-family: Lora, serif; font-size: 15pt; color: var(--navy); width: 26mm; font-weight:600; }
-.sched .i { width: 10mm; font-size: 13pt; color: var(--lav); text-align:center; }
-.sched .e { font-size: 11pt; font-weight: 600; color: var(--navy); }
-.sched .d { display:block; font-weight:400; font-size: 9.5pt; color: var(--muted); }
-.sched tr.wake td { background: #FDF0DC; } .sched tr.wake .i { color:#D9973F; }
-.sched tr.calm td { background: #FBE9E5; } .sched tr.calm .i { color: var(--pink); }
-.sched tr.night td { background: var(--navy); } .sched tr.night .t, .sched tr.night .e { color:#FFF6E6; } .sched tr.night .i { color: var(--peach); }
-.sdisc { margin-top: 5mm; font-size: 9.6pt; color: var(--ink); background:#F6F3FB; border-left: 3px solid var(--lav); border-radius: 0 3mm 3mm 0; padding: 3.5mm 4.5mm; }
-.note { margin-top: 6mm; font-size: 10.2pt; color: var(--ink); border-top: 1px solid #E8E3F2; padding-top: 5mm; }
-.note b { color: var(--navy); }
-.end { background: var(--navy); color: var(--cream); display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center; }
-.end .cloud { width: 60mm; }
-.end h2 { color: #FFF6E6; font-size: 20pt; font-weight:500; margin: 6mm 0 4mm; }
-.end p { color:#CFC7E8; max-width: 130mm; }
-.cdisc { font-size: 8.5pt; line-height:1.5; color:#CFC7E8; background: rgba(255,255,255,.06); border:1px solid rgba(207,199,232,.22); border-radius: 3mm; padding: 3.5mm 4.5mm; margin-bottom: 5mm; }
-.disc b { color:#FFF6E6; }
-.end .sign { font-family: Lora, serif; font-style: italic; color: var(--peach); font-size: 12pt; margin-top: -1mm; }
-.contacts { margin-top: 5mm; font-size: 8.5pt; color:#A9A1CC; line-height:1.7; }
-.contacts span { color: var(--peach); }
-.disc { margin-top: 18mm; font-size: 8.5pt; color:#A9A1CC; max-width: 140mm; border-top: 1px solid rgba(207,199,232,.25); padding-top: 5mm; }
+.full { width: 210mm; height: 297mm; overflow: hidden; }
+
+/* ── обложка ── */
+.cover { background: var(--night); color: var(--cream); padding: 20mm 20mm 18mm; display:flex; flex-direction:column; }
+.wm { font-family: Rubik; font-weight:700; font-size: 26pt; letter-spacing:-.3px; color: var(--cream); position:relative; display:inline-block; line-height:1; }
+.yo { position:relative; display:inline-block; }
+.wm-star { position:absolute; width:.42em; height:.42em; left:50%; top:-.12em; transform:translateX(-50%); filter: drop-shadow(0 0 4px rgba(243,177,126,.8)); }
+.desc { font-size: 10pt; color: var(--lav); margin-top: 2.5mm; letter-spacing:.2px; }
+.hero { margin: 12mm 0 6mm; display:flex; justify-content:center; }
+.hero img { width: 128mm; height:auto; display:block; }
+.cover h1 { font-weight:600; font-size: 27pt; line-height:1.15; margin: 4mm 0; color:#FFF6E8; letter-spacing:-.2px; }
+.cover .sub { font-size: 11pt; color:#C9C3DA; max-width: 150mm; }
+.spacer { flex: 1; }
+.cdisc { font-size: 8.6pt; line-height:1.55; color:#C9C3DA; background: rgba(62,79,124,.35); border:1px solid rgba(157,146,182,.28); border-radius: 16px; padding: 4mm 5mm; margin: 0 0 5mm; }
+.meta { display:flex; justify-content:space-between; font-size: 8.8pt; color: var(--lav); border-top:1px solid rgba(157,146,182,.25); padding-top: 4mm; }
+
+/* ── разделы ── */
+.head { display:flex; align-items:center; gap: 4mm; margin-bottom: 7mm; }
+.badge { width:13mm; height:13mm; border-radius:50%; background: var(--night); color: var(--apricot); display:flex; align-items:center; justify-content:center; flex:none; border: 2.5px solid rgba(243,177,126,.35); }
+.badge .ic { width:7mm; height:7mm; }
+.kicker { font-size: 8pt; text-transform: uppercase; letter-spacing: 1.6px; color: var(--indigo); font-weight:600; }
+.ptitle { font-size: 20pt; line-height:1.2; font-weight:600; margin: .5mm 0 0; color: var(--night); letter-spacing:-.2px; }
+h2 { font-size: 13.5pt; font-weight:600; color: var(--night); margin: 7mm 0 2.5mm; break-after: avoid; }
+.body > h2:first-child { margin-top: 0; }
+h3 { font-size: 11.2pt; font-weight:600; color: var(--indigo); margin: 5mm 0 1.5mm; break-after: avoid; display:flex; align-items:center; gap: 2.5mm; }
+h3::before { content:""; width:2.4mm; height:2.4mm; border-radius:50%; background: var(--apricot); flex:none; }
+p { margin: 0 0 2.6mm; }
+ul { margin: 0 0 3mm; padding-left: 0; list-style: none; }
+ul.short { break-inside: avoid; }
+li { position:relative; padding-left: 6mm; margin-bottom: 1.8mm; break-inside: avoid; }
+li::before { content:""; position:absolute; left:1mm; top:2.3mm; width:1.8mm; height:1.8mm; border-radius:50%; background: var(--apricot); }
+strong { color: var(--night); font-weight:600; }
+
+/* «Коротко о главном» — первый абзац Части 1 тёмной карточкой-ночником */
+.rec > h2:first-child { margin-top: 0; }
+.rec > h2:first-child + p { background: var(--night); color: var(--cream); border-radius: 18px; padding: 5.5mm 6mm; font-size: 11pt; line-height:1.6; }
+
+/* ── режим ── */
+.intro { background: var(--tint); border-radius: 16px; padding: 4.5mm 5.5mm; margin-bottom: 6mm; }
+.sched { background: var(--night); border-radius: 22px; padding: 5mm; }
+.row { display:flex; align-items:center; gap: 4mm; padding: 3.6mm 3mm; border-bottom: 1px solid rgba(157,146,182,.18); break-inside: avoid; }
+.row:last-child { border-bottom: 0; }
+.row .t { font-family: Rubik; font-weight:600; font-size: 15pt; color: var(--apricot); width: 24mm; flex:none; }
+.row .ri { width:6mm; height:6mm; color: var(--lav); flex:none; }
+.row .e { font-family: Rubik; font-weight:500; font-size: 11.5pt; color: var(--cream); }
+.row .e span { display:block; font-family: Onest; font-weight:400; font-size: 9.4pt; color:#B9B3CE; margin-top:.5mm; }
+.row.night { background: rgba(62,79,124,.55); border-radius: 14px; border-bottom: 0; }
+.row.night .ri, .row.wake .ri { color: var(--apricot); }
+.sdisc { margin-top: 5mm; font-size: 9.4pt; color: var(--ink); background: var(--tint); border-radius: 14px; padding: 3.8mm 5mm; }
+.note { margin-top: 5mm; font-size: 10.2pt; border-top: 1px solid var(--line); padding-top: 4.5mm; }
+.note b { color: var(--night); }
+
+/* ── финал ── */
+.end { background: var(--night); color: var(--cream); display:flex; flex-direction:column; align-items:center; text-align:center; padding: 30mm 22mm 18mm; }
+/* Персонаж на прозрачном фоне стоит прямо на тёмной странице, без
+   карточки. Свечение — drop-shadow: он идёт по контуру облачка, а
+   box-shadow обвёл бы прямоугольник картинки. */
+.end .pic { width: 112mm; display:block; filter: drop-shadow(0 0 18mm rgba(243,177,126,.26)); }
+.end h2 { font-size: 22pt; font-weight:600; color:#FFF6E8; margin: 8mm 0 2mm; }
+.end .sign { font-family: Rubik; font-weight:500; color: var(--apricot); font-size: 12pt; }
+.fdisc { font-size: 8.6pt; line-height:1.55; color:#C9C3DA; text-align:left; background: rgba(62,79,124,.35); border:1px solid rgba(157,146,182,.28); border-radius: 16px; padding: 4.5mm 5.5mm; }
+.fdisc b { color: var(--cream); }
+.contacts { margin-top: 5mm; font-size: 8.8pt; color: var(--lav); line-height:1.8; }
+.contacts span { color: var(--apricot); }
 `;
 
 // Колонтитул содержательных страниц. Живёт в поле страницы, поэтому его
-// задаёт сам Chromium, а не разметка — отсюда inline-стили.
+// задаёт сам Chromium, а не разметка — отсюда inline-стили. Шрифты
+// страницы сюда не достают: Chromium рендерит колонтитул отдельным
+// документом, и он печатается системным гротеском.
 export const FOOTER_TEMPLATE =
-  '<div style="width:100%;font-family:Inter,sans-serif;font-size:7.5pt;color:#6E6A82;padding:0 20mm;' +
-  'display:flex;justify-content:space-between"><span>Дрёма · персональный план сна</span>' +
-  '<span>стр. <span class="pageNumber"></span></span></div>';
+  '<div style="width:100%;font-family:Onest,sans-serif;font-size:7.5pt;color:#5F6683;padding:0 20mm;' +
+  `display:flex;justify-content:space-between"><span>${BRAND} · персональный план сна</span>` +
+  '<span><span class="pageNumber"></span></span></div>';
 
 function document(body: string, pageMargin: string): string {
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><style>
@@ -237,9 +329,11 @@ function document(body: string, pageMargin: string): string {
 ${CSS}</style></head><body>${body}</body></html>`;
 }
 
-function contentPage(kicker: string, title: string, body: string): string {
-  return `<section class="page"><div class="kicker">${escapeHtml(kicker)}</div>` +
-    `<h1 class="ptitle">${escapeHtml(title)}</h1>${body}</section>`;
+function contentPage(kicker: string, title: string, ico: string, body: string, cls = ""): string {
+  return `<section class="page"><div class="head"><div class="badge">${icon(ico)}</div>` +
+    `<div><div class="kicker">${escapeHtml(kicker)}</div>` +
+    `<h1 class="ptitle">${escapeHtml(title)}</h1></div></div>` +
+    `<div class="body ${cls}">${body}</div></section>`;
 }
 
 export interface PdfParts {
@@ -252,24 +346,26 @@ export interface PdfParts {
 // обложке; памятка приходит отдельно, её текст лежит в репозитории.
 export function buildPdfParts(content: PdfContent, relaxationMemo: string, approvedAt: Date): PdfParts {
   const cover = `<section class="page full cover">
-<span class="star" style="top:30mm;right:32mm;font-size:14pt">✦</span><span class="star" style="top:70mm;left:26mm;font-size:9pt">✦</span>
-<span class="star" style="top:118mm;right:24mm;font-size:8pt">★</span>
-<div class="brand">Дрёма<small>ваш помощник по детскому сну</small></div>
-<div>${CLOUD}</div>
-<div><h1>Персональный план сна<br>для вашего малыша</h1>
-<div class="sub">Что попробовать в вашей ситуации, примерный режим дня и памятка о том, как помочь малышу расслабиться перед сном.</div></div>
+<div>${WORDMARK}<div class="desc">${DESCRIPTOR}</div></div>
+<div class="hero"><img src="${COVER_IMAGE}"></div>
+<h1>Персональный план сна<br>для вашего малыша</h1>
+<div class="sub">Что попробовать в вашей ситуации, примерный режим дня и памятка о том, как помочь малышу расслабиться перед сном.</div>
+<div class="spacer"></div>
 <div class="cdisc">${COVER_DISCLAIMER}</div>
 <div class="meta"><span>Подготовлено по вашей анкете и разбору</span><span>${escapeHtml(formatRussianDate(approvedAt))}</span></div></section>`;
 
   const recommendations = contentPage(
     "Часть 1",
     "Что попробовать в вашей ситуации",
-    `<div class="rec">${markdown(content.recommendations)}</div>`
+    "loupe",
+    markdown(content.recommendations),
+    "rec"
   );
 
   const schedule = contentPage(
     "Часть 2",
     "Примерный режим дня",
+    "moon",
     `<div class="intro">${inline(content.schedule.intro)}</div>` +
       scheduleBlock(content.schedule.variants) +
       `<div class="sdisc">${escapeHtml(SCHEDULE_DISCLAIMER)}</div>` +
@@ -279,17 +375,21 @@ export function buildPdfParts(content: PdfContent, relaxationMemo: string, appro
   const relaxation = contentPage(
     "Часть 3",
     "Памятка: как помочь малышу расслабиться перед сном",
+    "heart",
     markdown(relaxationMemo)
   );
 
-  const end = `<section class="page full end">${CLOUD}<h2>Спокойной ночи 💛</h2>
-<div class="sign">Ваш помощник Дрёма</div>
-<div class="disc">${FINAL_DISCLAIMER}</div>
+  const end = `<section class="page full end">
+<img class="pic" src="${FINAL_IMAGE}">
+<h2>Спокойной ночи 💛</h2>
+<div class="sign">Ваш помощник ${BRAND}</div>
+<div class="spacer"></div>
+<div class="fdisc">${FINAL_DISCLAIMER}</div>
 <div class="contacts">${contacts()}</div></section>`;
 
   return {
     cover: document(cover, "0"),
-    content: document(recommendations + schedule + relaxation, "20mm 20mm 20mm"),
+    content: document(recommendations + schedule + relaxation, "18mm 20mm"),
     end: document(end, "0"),
   };
 }

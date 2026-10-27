@@ -1,6 +1,6 @@
 """Делает публичный пример PDF: страницы памятки растрируются и размываются,
 чтобы текст нельзя было ни прочитать, ни скопировать. Видны только заголовок памятки и плашка.
-Запуск: python3 blur_example.py <вход.pdf> <выход.pdf>"""
+Запуск: python3 blur_example_dremius.py <вход.pdf> <выход.pdf>"""
 import subprocess, sys, tempfile
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -10,14 +10,14 @@ SRC, DST = Path(sys.argv[1]), Path(sys.argv[2])
 DPI = 110
 FONT_B = "/usr/share/fonts/opentype/inter/Inter-SemiBold.otf"
 FONT_R = "/usr/share/fonts/opentype/inter/Inter-Regular.otf"
-SERIF = "/usr/share/fonts/truetype/google-fonts/Lora-Variable.ttf"
+SERIF = "/usr/share/fonts/opentype/inter/Inter-Bold.otf"
 
 
 def memo_pages(reader):
     pages = []
     for i, p in enumerate(reader.pages):
-        t = p.extract_text() or ""
-        if "Памятка:" in t or (pages and i == pages[-1] + 1 and "Спокойной ночи" not in t):
+        t = "".join((p.extract_text() or "").split())  # без пробелов: извлечение текста вставляет лишние
+        if "Памятка:" in t or (pages and i == pages[-1] + 1 and "Спокойнойночи" not in t):
             pages.append(i)
     return pages
 
@@ -27,14 +27,14 @@ def badge(img, first):
     W, H = img.size
     bw, bh = int(W * 0.78), int(H * 0.15)
     x0, y0 = (W - bw) // 2, int(H * (0.42 if first else 0.40))
-    d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=int(bh * 0.18), fill="#1B1A3A")
+    d.rounded_rectangle([x0, y0, x0 + bw, y0 + bh], radius=int(bh * 0.18), fill="#10182F")
     f1 = ImageFont.truetype(SERIF if Path(SERIF).exists() else FONT_B, int(H * 0.022))
     f2 = ImageFont.truetype(FONT_R, int(H * 0.0135))
     t1 = "Полная памятка — в вашем плане"
     t2 = "Спокойные занятия для последнего часа перед сном,\nкороткий вечерний ритуал и что делать,\nесли малыш капризничает"
     w1 = d.textlength(t1, font=f1)
-    d.text(((W - w1) / 2, y0 + bh * 0.2), t1, font=f1, fill="#FFF6E6")
-    d.multiline_text((W / 2, y0 + bh * 0.52), t2, font=f2, fill="#CFC7E8", anchor="ma", align="center", spacing=int(H * 0.005))
+    d.text(((W - w1) / 2, y0 + bh * 0.2), t1, font=f1, fill="#FFF1D9")
+    d.multiline_text((W / 2, y0 + bh * 0.52), t2, font=f2, fill="#9D92B6", anchor="ma", align="center", spacing=int(H * 0.005))
 
 
 def main():

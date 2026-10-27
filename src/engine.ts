@@ -1908,7 +1908,7 @@ async function handleAwaitingRecommendation(ctx: Context, session: Session, mess
 
 // ── Оффер платного PDF ──────────────────────────────────────────────
 
-const EXAMPLE_PDF = "assets/example/Drema_plan_sna_primer.pdf";
+const EXAMPLE_PDF = "assets/example/Dremius_plan_sna_primer.pdf";
 
 function exampleFollowUp(ctx: Context) {
   return replyStatic(ctx, texts.exampleFollowup, {
@@ -2338,7 +2338,7 @@ export async function approveAndSendPdf(api: Api, orderId: number): Promise<void
 
   await api.sendDocument(
     Number(order.telegramId),
-    new InputFile(pdf, "Drema_plan_sna.pdf"),
+    new InputFile(pdf, "Dremius_plan_sna.pdf"),
     { caption: texts.pdfCaption }
   );
 
