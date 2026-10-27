@@ -25,7 +25,7 @@ export function renderLoginPage(options: { failed?: boolean; next?: string } = {
     "Вход",
     html`<style>${raw(style)}</style>
       <div class="login">
-        <h1>Админка Дрёмы</h1>
+        <h1>Админка Дрёмиуса</h1>
         ${raw(error)}
         <div class="card">
           <form method="post" action="/admin/login">

@@ -1,7 +1,7 @@
 // Меню бота: сами экраны.
 //
 // Здесь только то, что бот показывает по /menu и по трём его пунктам —
-// «Поддержка», «Документы», «Команда Дрёмы». Ни один из них не трогает
+// «Поддержка», «Документы», «Команда Дрёмиуса». Ни один из них не трогает
 // состояние сценария: человек может открыть меню посреди анкеты и
 // вернуться к ней той же кнопкой.
 //
@@ -20,7 +20,7 @@ import { backToQuizKeyboard, menuKeyboard, supportLinkKeyboard } from "./keyboar
 import { replyStatic } from "./send";
 import { projectFileExists, sendCachedPhoto, projectFile } from "./staticDocs";
 
-// Фото для пункта «Команда Дрёмы». Файла может не быть — тогда уходит
+// Фото для пункта «Команда Дрёмиуса». Файла может не быть — тогда уходит
 // только текст, и это штатный случай, а не ошибка.
 const TEAM_PHOTO = "assets/team/anna.jpg";
 
@@ -98,7 +98,7 @@ export async function sendDocs(ctx: Context, showBack: boolean) {
   });
 }
 
-// ── Команда Дрёмы ───────────────────────────────────────────────────
+// ── Команда Дрёмиуса ───────────────────────────────────────────────────
 
 export async function sendTeam(ctx: Context, showBack: boolean) {
   if (projectFileExists(TEAM_PHOTO)) {

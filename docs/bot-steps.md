@@ -194,7 +194,7 @@
 | 13.1 | `/menu` | `menu_opened` |
 | 13.2 | «Поддержка» | `menu_support` |
 | 13.3 | «Документы» | `menu_docs` |
-| 13.4 | «Команда Дрёмы» | `menu_team` |
+| 13.4 | «Команда Дрёмиуса» | `menu_team` |
 | 13.5 | «Вернуться к анкете» | `menu_back_to_quiz`, следом `quiz_question_shown` |
 | 13.6 | `/support`, `/docs`, `/team` вручную | те же события |
 

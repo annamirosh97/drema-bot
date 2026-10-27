@@ -2,7 +2,7 @@
   "name": "drema-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Телеграм-бот «Дрёма» на собственном бэкенде (без Make)",
+  "description": "Телеграм-бот «Дрёмиус» на собственном бэкенде (без Make)",
   "engines": {
     "node": ">=18"
   },

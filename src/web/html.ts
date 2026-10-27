@@ -114,7 +114,7 @@ export function page(title: string, body: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escape(title)} · Дрёма</title>
+<title>${escape(title)} · Дрёмиус</title>
 <style>${STYLES}</style>
 </head>
 <body><div class="wrap">${body}

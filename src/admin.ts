@@ -162,7 +162,7 @@ export function buildMenuBlock(events: { type: string }[], days: number): string
     `  открывали: ${count("menu_opened")}`,
     `  поддержка: ${count("menu_support")}`,
     `  документы: ${count("menu_docs")}`,
-    `  команда Дрёмы: ${count("menu_team")}`,
+    `  команда Дрёмиуса: ${count("menu_team")}`,
     `  начать заново: спросили ${asked}, подтвердили ${confirmed}`,
   ];
 

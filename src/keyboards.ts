@@ -59,7 +59,7 @@ export function menuKeyboard(withBack = false): InlineKeyboard {
     .row()
     .text("Документы", "menu_docs")
     .row()
-    .text("Команда Дрёмы", "menu_team");
+    .text("Команда Дрёмиуса", "menu_team");
 
   return withBack ? keyboard.row().text(BACK_TO_QUIZ, "menu_back") : keyboard;
 }
