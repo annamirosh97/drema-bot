@@ -204,7 +204,7 @@ export async function handleIncoming(ctx: Context) {
   // Меню разбираем до проверки согласия, и это осознанно: в нём лежат
   // «Документы», то есть ровно то, что человек может захотеть прочитать
   // ПЕРЕД тем, как дать согласие. Пустить дальше анкеты это не может:
-  // «Начать заново» ведёт на экран «Прежде чем начать», а оттуда — на
+  // «Начать заново» ведёт на экран условий, а оттуда — на
   // согласие, если его нет.
   if (callbackData && MENU_CALLBACKS.has(callbackData)) {
     return handleMenuCallback(ctx, session, callbackData);
@@ -555,7 +555,7 @@ async function handleStartCommand(ctx: Context, session: Session) {
     // обязательно. Иначе человек видит первый экран, а бот считает, что
     // он всё ещё на прежнем, и следующая кнопка уходит в его обработчик:
     // «Что я получу?» с застрявшей стадией TERMS_HEALTH возвращала
-    // «Прежде чем начать».
+    // экран условий.
     await prisma.session.update({
       where: { telegramId: session.telegramId },
       data: { stage: "WELCOME", status: "onboarding", resumeStage: null },
@@ -628,7 +628,7 @@ async function confirmRestart(ctx: Context, session: Session) {
   await beginNewAttempt(session, "restart");
   await replaceConfirmMessage(ctx, texts.restartStarted);
 
-  // Дальше путь онбординга с самого начала. Экран «Прежде чем начать»
+  // Дальше путь онбординга с самого начала. Экран условий
   // человек увидит снова — состояние малыша могло измениться, — а
   // согласия, на которые ответ уже есть, пропустятся сами.
   return sendWelcome(ctx);
@@ -692,7 +692,7 @@ async function beginNewAttempt(session: Session, reason: NewAttemptReason) {
   });
 }
 
-// Куда идти после «Прежде чем начать».
+// Куда идти после экрана условий.
 //
 // У того, кто начал заново, согласия, на которые ответ уже есть в
 // журнале, второй раз не спрашиваем (п.3 ТЗ). Первое прохождение идёт
