@@ -105,11 +105,15 @@ export const BACK_TO_MENU = "Вернуться к меню";
 
 // Клавиатура раздела меню: «Поддержка», «Документы», «О Дрёмиусе и
 // команде». Возврат к меню первым — это шаг назад оттуда, где человек
-// стоит; возврат к анкете ниже, он уводит дальше и появляется, только
-// если анкета идёт.
+// стоит; анкета ниже, она уводит дальше и появляется, только если идёт.
+//
+// Подпись «Продолжить анкету», а не «Вернуться к анкете»: из раздела
+// человек возвращается не в меню, из которого пришёл, а сразу к
+// вопросу, и «вернуться» тут обещало бы шаг назад. В самом меню
+// подпись прежняя.
 export function menuSectionKeyboard(withBack: boolean): InlineKeyboard {
   const keyboard = new InlineKeyboard().text(BACK_TO_MENU, "menu_root");
-  return withBack ? keyboard.row().text(BACK_TO_QUIZ, "menu_back") : keyboard;
+  return withBack ? keyboard.row().text(QUIZ_CONTINUE, "menu_back") : keyboard;
 }
 
 // Кнопка-ссылка в бот поддержки. Параметр src_menu доезжает до карточки
