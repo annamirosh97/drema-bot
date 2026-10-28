@@ -371,6 +371,10 @@ function timelineBlock(data: UserCardData): string {
 function attemptsTab(data: UserCardData): string {
   if (!data.attempts.length) return html`<p class="muted">Анкету не начинала.</p>`;
 
+  const exportUrl = (attempt?: number) =>
+    `/admin/users/${data.telegramId}/questionnaire.txt` +
+    (attempt == null ? "" : `?attempt=${attempt}`);
+
   const blocks = data.attempts.map((a) => {
     const rows = a.answers.map((ans) => {
       const changed = a.changed.has(ans.question);
@@ -399,6 +403,9 @@ function attemptsTab(data: UserCardData): string {
         )}${raw(a.completedAt ? "" : html`, остановилась на вопросе ${a.lastStep ?? "—"}`)}
         <span class="muted">· версия ${a.version}</span>
       </summary>
+      <p class="row-actions" style="margin-top:0">
+        <a class="btn secondary" href="${exportUrl(a.attemptNumber)}">Выгрузить .txt</a>
+      </p>
       ${raw(
         a.previousAnswers
           ? html`<p class="muted">Подсвечены ответы, изменившиеся относительно прохождения №${a.attemptNumber - 1}.</p>`
@@ -408,7 +415,16 @@ function attemptsTab(data: UserCardData): string {
     </details>`;
   });
 
-  return blocks.join("");
+  // Кнопка на все прохождения нужна только когда их больше одного: при
+  // единственном она выгружает ровно то же, что кнопка над ним.
+  const all =
+    data.attempts.length > 1
+      ? html`<p class="row-actions">
+          <a class="btn secondary" href="${exportUrl()}">Выгрузить все прохождения одним файлом</a>
+        </p>`
+      : "";
+
+  return blocks.join("") + all;
 }
 
 function recommendationsTab(data: UserCardData): string {

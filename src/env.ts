@@ -72,10 +72,6 @@ export const env = {
   // Ставить ли cookie флаг Secure. На Railway — да, локально нет:
   // иначе cookie не доедет по http и админку нельзя отладить.
   ADMIN_HTTPS_ONLY: (process.env.ADMIN_HTTPS_ONLY ?? "true") !== "false",
-  // Старый пароль basic auth. Оставлен только для того, чтобы деплой с
-  // прежними переменными не остался вообще без защиты, пока новые не
-  // прописаны: см. src/web/server.ts.
-  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD ?? "",
   // Пороги таймеров ожидания из ТЗ админки, в часах. Вынесены в
   // переменные, потому что обещание родителю может измениться.
   SLA_PROMISE_HOURS: parseInt(process.env.SLA_PROMISE_HOURS ?? "24", 10) || 24,

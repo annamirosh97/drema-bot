@@ -8,6 +8,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { env } from "../env";
 import { attemptView } from "../attempts";
+import { formatMoscow } from "../consents";
 import { getQuestion } from "../questions";
 import { safeGetQuestion } from "../prep";
 import { buildTimeline, TimelineKind } from "./timeline";
@@ -426,3 +427,73 @@ export async function logAdminAction(
 }
 
 export { getQuestion };
+
+// ── Выгрузка анкеты текстовым файлом ────────────────────────────────
+//
+// Карточка показывает те же ответы, но файл уезжает из админки, поэтому
+// в нём сразу написано, чьи это ответы и какое прохождение: без шапки
+// через неделю не понять, что за anketa_302036066_2.txt лежит в папке.
+//
+// Пометки админа (теги, заметка) в файл не попадают: это анкета
+// родителя, а не досье на него.
+
+function pad(n: number, width: number): string {
+  return String(n).padStart(width, " ");
+}
+
+function attemptBlock(attempt: AttemptCard, total: number): string {
+  const lines = [
+    `Прохождение №${attempt.attemptNumber} из ${total} · ${attempt.view}`,
+    `Начато: ${formatMoscow(attempt.startedAt)}`,
+  ];
+  lines.push(
+    attempt.completedAt
+      ? `Завершено: ${formatMoscow(attempt.completedAt)}`
+      : `Не завершено, остановились на вопросе ${attempt.lastStep ?? "—"}`
+  );
+  lines.push(`Версия анкеты: ${attempt.version}`, "");
+
+  if (!attempt.answers.length) {
+    lines.push("Ответов нет.", "");
+    return lines.join("\n");
+  }
+
+  // Номер проставляем по порядку, а не берём из вопроса: у анкеты есть
+  // дробные номера (4.5 — условный вопрос), и в файле они сбивали бы.
+  attempt.answers.forEach((a, i) => {
+    lines.push(`${pad(i + 1, 2)}. ${a.question}`);
+    // Многострочный ответ родителя выравниваем под первую строку.
+    for (const part of a.answer.split("\n")) lines.push(`    ${part}`);
+    lines.push("");
+  });
+
+  return lines.join("\n");
+}
+
+// Весь файл. Без attemptNumber отдаёт все прохождения подряд.
+export function buildQuestionnaireText(
+  data: UserCardData,
+  attemptNumber?: number
+): { filename: string; body: string } | null {
+  const chosen =
+    attemptNumber == null
+      ? data.attempts
+      : data.attempts.filter((a) => a.attemptNumber === attemptNumber);
+  if (!chosen.length) return null;
+
+  const who = data.firstName ?? (data.username ? `@${data.username}` : "без имени");
+  const head = [
+    "Анкета родителя",
+    `Кто: ${who}${data.username ? ` (@${data.username})` : ""}, id ${data.telegramId}`,
+    `Выгружено: ${formatMoscow(new Date())}`,
+    "",
+    "─".repeat(60),
+    "",
+  ];
+
+  const body = head.join("\n") +
+    chosen.map((a) => attemptBlock(a, data.attemptsCount)).join("─".repeat(60) + "\n\n");
+
+  const suffix = attemptNumber == null ? "vse" : String(attemptNumber);
+  return { filename: `anketa_${data.telegramId}_${suffix}.txt`, body };
+}

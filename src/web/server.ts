@@ -4,9 +4,9 @@
 // вызывает генерацию и шлёт уведомления через bot.api, без очередей и
 // межпроцессного взаимодействия. Нагрузка — один человек, этого хватает.
 //
-// Если ADMIN_PASSWORD не задан, сервер не поднимается, а бот продолжает
-// работать. Иначе первый же деплой до того, как переменная прописана,
-// уронил бы бота целиком.
+// Если переменные админки не заданы, сервер всё равно поднимается, а
+// админка отвечает 503 со списком недостающих. Иначе первый же деплой
+// до того, как их прописали, уронил бы бота целиком.
 
 import express, { NextFunction, Request, Response } from "express";
 import type { Api } from "grammy";
@@ -60,6 +60,7 @@ import { renderAuthNotConfigured, renderLoginPage } from "./loginPage";
 import { renderUserCard, renderUsersPage, usersCsv } from "./usersPages";
 import {
   loadAllUserRows,
+  buildQuestionnaireText,
   loadUserCard,
   loadUsersPage,
   logAdminAction,
@@ -1071,6 +1072,36 @@ export function startAdminServer(api: Api) {
     const data = await loadUserCard(telegramId, filter);
     if (!data) return res.status(404).send("Такого пользователя нет.");
     res.type("html").send(renderUserCard(data));
+  });
+
+  // Анкета текстовым файлом. Без параметра attempt — все прохождения
+  // подряд, с ним — одно. Данные те же, что в карточке: ничего нового
+  // здесь не запрашивается и не считается.
+  app.get("/admin/users/:telegramId/questionnaire.txt", async (req, res) => {
+    let telegramId: bigint;
+    try {
+      telegramId = BigInt(req.params.telegramId);
+    } catch {
+      return res.status(404).send("Такого пользователя нет.");
+    }
+
+    const raw = typeof req.query.attempt === "string" ? Number(req.query.attempt) : NaN;
+    const attempt = Number.isInteger(raw) ? raw : undefined;
+
+    const data = await loadUserCard(telegramId, "");
+    if (!data) return res.status(404).send("Такого пользователя нет.");
+
+    const file = buildQuestionnaireText(data, attempt);
+    if (!file) return res.status(404).send("Такого прохождения нет.");
+
+    // filename* с UTF-8: имя файла только из цифр и латиницы, но без
+    // звёздочки некоторые браузеры всё равно портят кодировку.
+    res.type("text/plain; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${file.filename}"; filename*=UTF-8''${encodeURIComponent(file.filename)}`
+    );
+    res.send(file.body);
   });
 
   // Теги и заметка. Ответы родителей тут не правятся — только пометки
