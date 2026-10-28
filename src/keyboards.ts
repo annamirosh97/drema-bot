@@ -101,6 +101,17 @@ export function backToQuizKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text(BACK_TO_QUIZ, "menu_back");
 }
 
+export const BACK_TO_MENU = "Вернуться к меню";
+
+// Клавиатура раздела меню: «Поддержка», «Документы», «О Дрёмиусе и
+// команде». Возврат к меню первым — это шаг назад оттуда, где человек
+// стоит; возврат к анкете ниже, он уводит дальше и появляется, только
+// если анкета идёт.
+export function menuSectionKeyboard(withBack: boolean): InlineKeyboard {
+  const keyboard = new InlineKeyboard().text(BACK_TO_MENU, "menu_root");
+  return withBack ? keyboard.row().text(BACK_TO_QUIZ, "menu_back") : keyboard;
+}
+
 // Кнопка-ссылка в бот поддержки. Параметр src_menu доезжает до карточки
 // обращения: по нему видно, что человек пришёл из меню.
 //
@@ -108,10 +119,10 @@ export function backToQuizKeyboard(): InlineKeyboard {
 // сообщением: двух клавиатур на одном сообщении Telegram не покажет, а
 // лишнее сообщение ради одной кнопки — шум.
 export function supportLinkKeyboard(botUsername: string, withBack = false): InlineKeyboard {
-  const keyboard = new InlineKeyboard().url(
-    "Написать в поддержку",
-    `https://t.me/${botUsername}?start=src_menu`
-  );
+  const keyboard = new InlineKeyboard()
+    .url("Написать в поддержку", `https://t.me/${botUsername}?start=src_menu`)
+    .row()
+    .text(BACK_TO_MENU, "menu_root");
   return withBack ? keyboard.row().text(BACK_TO_QUIZ, "menu_back") : keyboard;
 }
 

@@ -454,6 +454,12 @@ async function handleMenuCallback(ctx: Context, session: Session, callbackData: 
     case "menu_team":
       await logOfferEvent(session.telegramId, "menu_team");
       return sendTeam(ctx, back);
+    case "menu_root":
+      // Возврат в меню из раздела. Событие то же, что у /menu: для
+      // статистики это такой же показ меню, и разделять их нечем —
+      // человек в обоих случаях на него смотрит.
+      await logOfferEvent(session.telegramId, "menu_opened");
+      return sendMenu(ctx, back);
     case "menu_back":
       // Следом resendCurrentStep напишет quiz_question_shown: по паре
       // событий видно, откуда человек вернулся.

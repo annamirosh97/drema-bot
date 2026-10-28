@@ -16,7 +16,7 @@
 import { Context } from "grammy";
 import { env } from "./env";
 import { texts } from "./texts";
-import { backToQuizKeyboard, menuKeyboard, supportLinkKeyboard } from "./keyboards";
+import { menuKeyboard, menuSectionKeyboard, supportLinkKeyboard } from "./keyboards";
 import { replyStatic } from "./send";
 import { projectFileExists, sendCachedPhoto, projectFile } from "./staticDocs";
 
@@ -25,6 +25,7 @@ import { projectFileExists, sendCachedPhoto, projectFile } from "./staticDocs";
 const TEAM_PHOTO = "assets/team/anna.jpg";
 
 export const MENU_CALLBACKS = new Set([
+  "menu_root",
   "menu_restart",
   "menu_support",
   "menu_docs",
@@ -32,10 +33,11 @@ export const MENU_CALLBACKS = new Set([
   "menu_back",
 ]);
 
-// Кнопка возврата — только если бот действительно чего-то ждёт.
-// Решает это движок: он один знает стадию.
-function backButton(showBack: boolean) {
-  return showBack ? { reply_markup: backToQuizKeyboard() } : {};
+// Клавиатура раздела: возврат к меню есть всегда, возврат к анкете —
+// только если бот действительно чего-то ждёт. Стадию знает движок, он и
+// передаёт сюда showBack.
+function sectionButtons(showBack: boolean) {
+  return { reply_markup: menuSectionKeyboard(showBack) };
 }
 
 export async function sendMenu(ctx: Context, showBack = false) {
@@ -55,7 +57,7 @@ export async function sendSupport(ctx: Context, showBack: boolean) {
   }
 
   const email = env.CONTACT_EMAIL ? `\n\n${texts.contactEmailLine(env.CONTACT_EMAIL)}` : "";
-  return replyStatic(ctx, `${texts.menuSupport("")}${email}`, backButton(showBack));
+  return replyStatic(ctx, `${texts.menuSupport("")}${email}`, sectionButtons(showBack));
 }
 
 // ── Документы ───────────────────────────────────────────────────────
@@ -94,7 +96,7 @@ function escapeAttribute(url: string): string {
 export async function sendDocs(ctx: Context, showBack: boolean) {
   await replyStatic(ctx, docsText(), {
     link_preview_options: { is_disabled: true },
-    ...backButton(showBack),
+    ...sectionButtons(showBack),
   });
 }
 
@@ -110,5 +112,5 @@ export async function sendTeam(ctx: Context, showBack: boolean) {
     }
   }
 
-  await replyStatic(ctx, texts.menuTeam, backButton(showBack));
+  await replyStatic(ctx, texts.menuTeam, sectionButtons(showBack));
 }
