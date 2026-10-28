@@ -55,6 +55,9 @@ bot.command("menu", (ctx) => handleMenuCommand(ctx, "menu"));
 bot.command("support", (ctx) => handleMenuCommand(ctx, "support"));
 bot.command("docs", (ctx) => handleMenuCommand(ctx, "docs"));
 bot.command("team", (ctx) => handleMenuCommand(ctx, "team"));
+// /about — тот же экран, что пункт меню и /team: в списке команд
+// понятнее называется «О Дрёмиусе», а текст и обработчик общие.
+bot.command("about", (ctx) => handleMenuCommand(ctx, "team"));
 // «Начать заново» для людей. Имя не /regen: оно уже занято админской
 // командой перегенерации разбора (/regen <id> в admin.ts).
 bot.command("restart", (ctx) => handleMenuCommand(ctx, "restart"));
@@ -143,13 +146,15 @@ async function main() {
   // Список команд за кнопкой слева от поля ввода. Короткий намеренно:
   // всё остальное лежит в самом меню, а длинный список людей пугает.
   // /start, /restart, /support, /docs, /team и /unsubscribe работают,
-  // если набрать руками, но здесь не показываются.
+  // если набрать руками, но здесь не показываются. /team и /about —
+  // одно и то же; в списке показываем вторую, её название понятнее.
   //
   // Задаём для личных чатов и отдельно для русского: Telegram выбирает
   // список по языку клиента, и без общего (без language_code) человек с
   // английским интерфейсом не увидел бы ничего.
   const commands = [
     { command: "menu", description: "Меню" },
+    { command: "about", description: "О Дрёмиусе и команде" },
     { command: "data", description: "Мои данные и согласия" },
   ];
   for (const language_code of [undefined, "ru"] as const) {

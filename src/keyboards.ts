@@ -56,6 +56,20 @@ export function welcomeValueKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("Начать", "start").row().text("Как я работаю", "how_it_works");
 }
 
+// ── Ссылки на сайт ──────────────────────────────────────────────────
+//
+// Кнопка-ссылка нажатием не возвращает боту ничего: клики считаются по
+// UTM на стороне сайта, и в коде для этого ничего не нужно.
+//
+// Метки собираются здесь, а не пишутся в каждой кнопке: различаются они
+// одним utm_content, и три набранных руками адреса разойдутся при
+// первой же правке.
+const SITE = "https://dremius.ru/";
+
+export function siteUrl(content: string): string {
+  return `${SITE}?utm_source=bot&utm_medium=telegram&utm_content=${content}`;
+}
+
 // ── Меню (/menu) ────────────────────────────────────────────────────
 
 // Кнопки по одной в строке: подписи длинные, и в два столбца Telegram
@@ -65,16 +79,20 @@ export function welcomeValueKeyboard(): InlineKeyboard {
 // Решает это движок: он один знает, есть ли вопрос, к которому можно
 // вернуться.
 export function menuKeyboard(withBack = false): InlineKeyboard {
-  const keyboard = new InlineKeyboard()
+  const keyboard = new InlineKeyboard();
+
+  // Возврат к анкете первой кнопкой: человек, открывший меню посреди
+  // анкеты, чаще всего хочет именно вернуться, а не читать документы.
+  if (withBack) keyboard.text(BACK_TO_QUIZ, "menu_back").row();
+
+  return keyboard
     .text("Начать бот заново", "menu_restart")
     .row()
     .text("Поддержка", "menu_support")
     .row()
     .text("Документы", "menu_docs")
     .row()
-    .text("Команда Дрёмиуса", "menu_team");
-
-  return withBack ? keyboard.row().text(BACK_TO_QUIZ, "menu_back") : keyboard;
+    .text("О Дрёмиусе и команде", "menu_team");
 }
 
 export const RESTART_YES = "Да, начать заново";
@@ -172,6 +190,16 @@ export function pdRevokeConfirmKeyboard(): InlineKeyboard {
     .text(DATA_REVOKE_YES, "data_revoke_yes")
     .row()
     .text(DATA_REVOKE_NO, "data_revoke_no");
+}
+
+// «Как я работаю». Клавиатура здесь, а не в движке: тот же экран
+// показывается и при переходе, и при повторе, и кнопка должна быть в
+// обоих местах.
+export function howItWorksKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("Начать", "start")
+    .row()
+    .url("Подробнее на сайте ↗", siteUrl("how_it_works"));
 }
 
 export const HEALTH_OK = "Ничего из этого";
@@ -287,6 +315,8 @@ export function offerChoiceKeyboard(): InlineKeyboard {
     .text("📄 Подробнее о плане", "offer_pdf_details")
     .row()
     .text("💬 Подробнее о консультации", "offer_consult_details")
+    .row()
+    .url("О продуктах на сайте ↗", siteUrl("offer"))
     .row()
     .text("Пока не нужно", "offer_decline");
 }

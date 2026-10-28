@@ -75,6 +75,7 @@ import {
   offerPdfCardKeyboard,
   singleChoiceKeyboard,
   summaryKeyboard,
+  howItWorksKeyboard,
   stepsKeyboard,
   welcomeKeyboard,
   welcomeValueKeyboard,
@@ -377,9 +378,7 @@ export async function resendCurrentStep(ctx: Context, session: Session) {
     case "STEPS":
       return sendSteps(ctx);
     case "HOW_IT_WORKS":
-      return replyStatic(ctx, texts.howItWorks, {
-        reply_markup: new InlineKeyboard().text("Начать", "start"),
-      });
+      return replyStatic(ctx, texts.howItWorks, { reply_markup: howItWorksKeyboard() });
     case "TERMS":
     case "TERMS_HEALTH":
     case "HEALTH_SCREEN":
@@ -871,16 +870,12 @@ async function goToHowItWorks(ctx: Context, session: Session) {
     data: { stage: "HOW_IT_WORKS" },
   });
   await logOnboarding(ctx.from!.id, "onb_how_it_works");
-  return replyStatic(ctx, texts.howItWorks, {
-    reply_markup: new InlineKeyboard().text("Начать", "start"),
-  });
+  return replyStatic(ctx, texts.howItWorks, { reply_markup: howItWorksKeyboard() });
 }
 
 async function handleHowItWorks(ctx: Context, session: Session, callbackData?: string) {
   if (callbackData === "start") return goToTermsHealth(ctx, session);
-  return replyStatic(ctx, texts.howItWorks, {
-    reply_markup: new InlineKeyboard().text("Начать", "start"),
-  });
+  return replyStatic(ctx, texts.howItWorks, { reply_markup: howItWorksKeyboard() });
 }
 
 // ── Обезличенный счётчик ────────────────────────────────────────────
