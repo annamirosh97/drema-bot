@@ -39,7 +39,7 @@ export const env = {
   // Цена платного PDF, в рублях. Одна для всех.
   PDF_PRICE_RUB: parseInt(process.env.PDF_PRICE_RUB ?? "990", 10) || 990,
   // Цена консультации специалиста, в рублях.
-  CONSULT_PRICE_RUB: parseInt(process.env.CONSULT_PRICE_RUB ?? "4990", 10) || 4990,
+  CONSULT_PRICE_RUB: parseInt(process.env.CONSULT_PRICE_RUB ?? "4190", 10) || 4190,
   // Telegram-username специалиста, который проводит консультации, без «@».
   // Подставляется в сообщения родителю: по нему он находит специалиста, а
   // специалист — его.
@@ -47,13 +47,31 @@ export const env = {
   // Telegram ID специалиста. Если задан, пакет заявки уходит не только
   // админу, но и ей. Писать ей бот сможет только после того, как она
   // хотя бы раз нажала /start — это ограничение Telegram.
+  // Аккаунт «Команда Дрёмиуса»: с него команда пишет родителю после
+  // заявки. Username подставляется в тексты, поэтому умолчание есть —
+  // без него родитель увидел бы «напишите @» без адресата.
+  TEAM_USERNAME: (process.env.TEAM_USERNAME ?? "dremius_team").replace(/^@/, ""),
+  // Telegram ID того же аккаунта: на него дублируется карточка заявки.
+  // Необязателен — дубль уходит, только если аккаунт нажимал /start.
+  TEAM_TELEGRAM_ID: process.env.TEAM_TELEGRAM_ID ?? "",
+  // Фото Софии в карточке консультации. Показывается превью ссылки,
+  // поэтому это адрес, а не файл. Пустой — карточка без фото.
+  // Telegram кэширует превью по адресу: меняя фото, меняй ?v=.
+  SOFIA_CARD_URL: legalUrl("SOFIA_CARD_URL", "/static/sofia_card.jpg?v=1"),
+  // Ссылки на оплату консультации: подставляются в шаблон сообщения,
+  // который бот присылает команде. Не заданы — в шаблоне останется
+  // «{ссылка на оплату}», и команда подставит руками.
+  CONSULT_PAY_URL: process.env.CONSULT_PAY_URL ?? "",
+  CONSULT_PAY_URL_DISCOUNT: process.env.CONSULT_PAY_URL_DISCOUNT ?? "",
   CONSULT_SPECIALIST_TELEGRAM_ID: process.env.CONSULT_SPECIALIST_TELEGRAM_ID ?? "",
   // Предложение консультации со скидкой тем, кто купил план: цена,
   // сколько дней оно действует и через сколько минут после отправки PDF
   // приходит. Задержка небольшая намеренно — чтобы предложение не
   // налезло на сам файл, но и пришло, пока план ещё перед глазами.
-  UPSELL_PRICE_RUB: parseInt(process.env.UPSELL_PRICE_RUB ?? "3990", 10) || 3990,
-  UPSELL_VALID_DAYS: parseInt(process.env.UPSELL_VALID_DAYS ?? "7", 10) || 7,
+  UPSELL_PRICE_RUB: parseInt(process.env.UPSELL_PRICE_RUB ?? "3190", 10) || 3190,
+  // Скидка после плана живёт часами, а не днями: цена обещана «до
+  // {дата, время}», и конец суток тут слишком крупная мера.
+  UPSELL_VALID_HOURS: parseInt(process.env.UPSELL_VALID_HOURS ?? "24", 10) || 24,
   UPSELL_DELAY_MIN: parseInt(process.env.UPSELL_DELAY_MIN ?? "2", 10) || 2,
   // Модели двух шагов генерации платного PDF: P1 «План» и P2 «Текст».
   // Разделены, чтобы сравнивать качество и цену по шагам, не трогая код.

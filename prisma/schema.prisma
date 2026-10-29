@@ -61,43 +61,43 @@ enum RecommendationStatus {
 }
 
 model Session {
-  id                  Int           @id @default(autoincrement())
-  telegramId          BigInt        @unique
-  chatId              BigInt
-  firstName           String?
-  stage               Stage         @default(WELCOME)
-  status              SessionStatus @default(onboarding)
-  currentQuestionNumber Float?      // заполнено, когда stage = QUESTION
+  id                    Int           @id @default(autoincrement())
+  telegramId            BigInt        @unique
+  chatId                BigInt
+  firstName             String?
+  stage                 Stage         @default(WELCOME)
+  status                SessionStatus @default(onboarding)
+  currentQuestionNumber Float? // заполнено, когда stage = QUESTION
   // Куда вернуть человека после согласий. Заполняется только у тех, кто
   // начал пользоваться ботом до того, как согласия появились: им экраны
   // показываются посреди сценария, и после ответа нужно вернуть их туда,
   // где они были.
-  resumeStage         Stage?
+  resumeStage           Stage?
   // Номер текущего прохождения анкеты. Растёт на единицу каждый раз,
   // когда человек начинает заново (/restart). Ответы и разборы прошлых
   // прохождений остаются в базе, но в новый разбор не попадают: читаем
   // только строки с этим номером (см. currentAttempt в engine.ts).
-  attempt             Int           @default(1)
+  attempt               Int           @default(1)
   // ── Поля для админки ──────────────────────────────────────────────
   // username Telegram без «@». Обновляется при каждом входе: человек
   // может его сменить, а админке нужен актуальный, чтобы открыть чат.
   // До 20.10.2026 username хранился только в заявке на консультацию.
-  username            String?
+  username              String?
   // Параметр deep-link из /start: откуда человек пришёл.
-  source              String?
+  source                String?
   // Ручные пометки админа. На поведение бота не влияют.
-  tags                String[]      @default([])
-  adminNote           String?
+  tags                  String[]      @default([])
+  adminNote             String?
   // Когда Telegram впервые ответил 403 на отправку этому человеку.
   // Ставится трансформером API, см. src/blockedTracker.ts.
-  botBlockedAt        DateTime?
+  botBlockedAt          DateTime?
   // Когда человек попросил удалить данные. Само удаление — отдельная
   // процедура, которой пока нет: порядок определит юрист.
-  deletionRequestedAt DateTime?
-  tempSelections      String[]      @default([]) // текущие выбранные варианты multi_choice (до "Готово")
-  yellowFlags         String[]      @default([]) // накопленные жёлтые флаги для ручной проверки
-  createdAt           DateTime      @default(now())
-  updatedAt           DateTime      @updatedAt
+  deletionRequestedAt   DateTime?
+  tempSelections        String[]      @default([]) // текущие выбранные варианты multi_choice (до "Готово")
+  yellowFlags           String[]      @default([]) // накопленные жёлтые флаги для ручной проверки
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
 
   answers         Answer[]
   // Разборов у человека столько, сколько прохождений анкеты: прошлые
@@ -130,27 +130,27 @@ model Answer {
 }
 
 model Recommendation {
-  id         Int                  @id @default(autoincrement())
+  id            Int                  @id @default(autoincrement())
   // Уникален не сам telegramId, а пара с прохождением: разборы прошлых
   // прохождений остаются в базе рядом с текущим.
-  telegramId BigInt
-  attempt    Int                  @default(1)
+  telegramId    BigInt
+  attempt       Int                  @default(1)
   // Что уйдёт или ушло родителю. Это и есть правимая версия.
-  message1   String?
-  message2   String?
+  message1      String?
+  message2      String?
   // Черновик модели, каким он пришёл из API. Не меняется никогда: по
   // ТЗ админки правки должны быть видны как diff, а для этого нужен
   // неизменный исходник. До 20.10.2026 его не было вовсе — правка
   // через /send затирала текст модели без следа.
-  aiMessage1 String?
-  aiMessage2 String?
+  aiMessage1    String?
+  aiMessage2    String?
   // Блок ВЫВОДЫ из первого вызова: по нему второй вызов пишет текст.
   // Храним, чтобы разбирать спорные разборы и не считать анализ заново.
-  analysis   String?
-  message3   String?
-  message4   String?
-  status     RecommendationStatus @default(pending)
-  sentAt     DateTime?
+  analysis      String?
+  message3      String?
+  message4      String?
+  status        RecommendationStatus @default(pending)
+  sentAt        DateTime?
   // Старт таймера ожидания: момент, с которого родитель ждёт разбор.
   // Отдельно от createdAt, потому что строка создаётся при завершении
   // анкеты, а таймер в будущем может стартовать и от другого события.
@@ -160,9 +160,9 @@ model Recommendation {
   deliveryError String?
   // Почему разбор отменён. Пока причина одна — человек начал заново, —
   // но текст хранится строкой: в админке он показывается как есть.
-  cancelReason String?
-  cancelledAt  DateTime?
-  createdAt  DateTime             @default(now())
+  cancelReason  String?
+  cancelledAt   DateTime?
+  createdAt     DateTime             @default(now())
 
   session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
 
@@ -248,27 +248,27 @@ model Order {
 // НЕ перезаписывается, правки живут отдельно в editedContent. Перезаписать
 // aiContent может только перегенерация.
 model PdfDraft {
-  id            Int      @id @default(autoincrement())
-  orderId       Int      @unique
-  aiContent     Json
-  editedContent Json?
-  rawPlan       String // полный ответ P1, как пришёл
-  reviewerNotes String   @default("")
-  planModel     String
-  writerModel   String
-  planTokensIn  Int      @default(0)
-  planTokensOut Int      @default(0)
-  writerTokensIn  Int    @default(0)
-  writerTokensOut Int    @default(0)
-  costUsd       Float?
-  generationCount Int    @default(1)
+  id              Int       @id @default(autoincrement())
+  orderId         Int       @unique
+  aiContent       Json
+  editedContent   Json?
+  rawPlan         String // полный ответ P1, как пришёл
+  reviewerNotes   String    @default("")
+  planModel       String
+  writerModel     String
+  planTokensIn    Int       @default(0)
+  planTokensOut   Int       @default(0)
+  writerTokensIn  Int       @default(0)
+  writerTokensOut Int       @default(0)
+  costUsd         Float?
+  generationCount Int       @default(1)
   // Готовый PDF, чтобы отправить повторно и не рендерить заново.
   // Файл около мегабайта, заказов десятки в месяц — в базе это дешевле,
   // чем заводить и монтировать отдельное файловое хранилище.
-  pdfBytes      Bytes?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  approvedAt    DateTime?
+  pdfBytes        Bytes?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  approvedAt      DateTime?
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 }
@@ -337,21 +337,21 @@ enum ConsentSource {
 // Внешнего ключа на Session намеренно нет: журнал должен пережить
 // удаление данных пользователя, а каскад унёс бы его вместе с сессией.
 model ConsentRecord {
-  id         Int           @id @default(autoincrement())
-  telegramId BigInt
-  type       ConsentType
-  action     ConsentAction
-  source     ConsentSource
+  id                      Int           @id @default(autoincrement())
+  telegramId              BigInt
+  type                    ConsentType
+  action                  ConsentAction
+  source                  ConsentSource
   // Документы, показанные в момент действия: для ПД это и политика, и
   // само согласие, поэтому список, а не одна ссылка.
-  documentIds Int[]        @default([])
+  documentIds             Int[]         @default([])
   // Точный текст, который видел человек, и кнопка, которую он нажал.
-  messageText       String
-  buttonText        String
-  telegramMessageId Int?
+  messageText             String
+  buttonText              String
+  telegramMessageId       Int?
   relatedOrderId          Int?
   relatedConsultRequestId Int?
-  createdAt               DateTime @default(now()) @db.Timestamptz(3)
+  createdAt               DateTime      @default(now()) @db.Timestamptz(3)
 
   @@index([telegramId, type, createdAt])
   @@index([type, action])
@@ -392,22 +392,22 @@ enum AnalysisRating {
 }
 
 model AnalysisFeedback {
-  id         Int             @id @default(autoincrement())
-  telegramId BigInt          @unique
-  scheduledAt DateTime
-  askedAt    DateTime?
-  rating     AnalysisRating?
-  comment    String?
-  skippedComment Boolean     @default(false)
-  answeredAt DateTime?
+  id              Int             @id @default(autoincrement())
+  telegramId      BigInt          @unique
+  scheduledAt     DateTime
+  askedAt         DateTime?
+  rating          AnalysisRating?
+  comment         String?
+  skippedComment  Boolean         @default(false)
+  answeredAt      DateTime?
   // Сообщение с просьбой о комментарии: по нему убираем кнопку
   // «Пропустить», когда комментарий всё-таки пришёл.
   promptMessageId Int?
-  skipReason String?
+  skipReason      String?
   // Вопрос уже переносили из-за лимита одного вопроса в сутки. Второй
   // раз не переносим: тогда спрашивать уже поздно.
-  limitDeferred Boolean      @default(false)
-  createdAt  DateTime        @default(now())
+  limitDeferred   Boolean         @default(false)
+  createdAt       DateTime        @default(now())
 
   @@index([askedAt])
   @@index([scheduledAt])
@@ -421,21 +421,21 @@ enum PdfResult {
 }
 
 model PdfFeedback {
-  id         Int        @id @default(autoincrement())
-  orderId    Int        @unique
-  telegramId BigInt
-  scheduledAt DateTime
-  askedAt    DateTime?
-  result     PdfResult?
-  comment    String?
-  skippedComment Boolean @default(false)
-  answeredAt DateTime?
+  id              Int        @id @default(autoincrement())
+  orderId         Int        @unique
+  telegramId      BigInt
+  scheduledAt     DateTime
+  askedAt         DateTime?
+  result          PdfResult?
+  comment         String?
+  skippedComment  Boolean    @default(false)
+  answeredAt      DateTime?
   // Сообщение с просьбой о комментарии: по нему убираем кнопку
   // «Пропустить», когда комментарий всё-таки пришёл.
   promptMessageId Int?
-  skipReason String?
-  limitDeferred Boolean  @default(false)
-  createdAt  DateTime   @default(now())
+  skipReason      String?
+  limitDeferred   Boolean    @default(false)
+  createdAt       DateTime   @default(now())
 
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
@@ -467,18 +467,18 @@ enum SupportDirection {
 }
 
 model SupportThread {
-  id         Int           @id @default(autoincrement())
-  telegramId BigInt        @unique
+  id                   Int           @id @default(autoincrement())
+  telegramId           BigInt        @unique
   // Тема в группе. Пустая, пока группа не привязана: сообщения в это
   // время копятся и переезжают в тему при привязке.
-  topicId    Int?
-  status     SupportStatus @default(WAITING)
+  topicId              Int?
+  status               SupportStatus @default(WAITING)
   // Параметр из /start, если родитель пришёл по ссылке с меткой.
-  source     String?
-  createdAt  DateTime      @default(now())
+  source               String?
+  createdAt            DateTime      @default(now())
   lastUserMessageAt    DateTime?
   lastSupportMessageAt DateTime?
-  closedAt   DateTime?
+  closedAt             DateTime?
 
   messages SupportMessage[]
 
@@ -486,17 +486,17 @@ model SupportThread {
 }
 
 model SupportMessage {
-  id              Int              @id @default(autoincrement())
-  threadId        Int
-  direction       SupportDirection
+  id               Int              @id @default(autoincrement())
+  threadId         Int
+  direction        SupportDirection
   authorTelegramId BigInt
-  type            String // text | photo | voice | document | ...
-  text            String? // текст или подпись
-  fileId          String? // сам файл не скачиваем, храним ссылку Telegram
-  userMessageId   Int? // id сообщения в чате с родителем
-  groupMessageId  Int? // id сообщения в теме группы
-  deliveryError   String?
-  createdAt       DateTime         @default(now())
+  type             String // text | photo | voice | document | ...
+  text             String? // текст или подпись
+  fileId           String? // сам файл не скачиваем, храним ссылку Telegram
+  userMessageId    Int? // id сообщения в чате с родителем
+  groupMessageId   Int? // id сообщения в теме группы
+  deliveryError    String?
+  createdAt        DateTime         @default(now())
 
   thread SupportThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
 
@@ -698,9 +698,9 @@ enum OfferEventType {
 // процедура удаления данных по отзыву согласия, снести их нужно явно:
 // см. пометку в src/dataCommand.ts.
 model OfferEvent {
-  id         Int            @id @default(autoincrement())
-  telegramId BigInt
-  type       OfferEventType
+  id             Int            @id @default(autoincrement())
+  telegramId     BigInt
+  type           OfferEventType
   // Номер вопроса анкеты у событий анкеты, правки ответов и
   // напоминаний; у остальных NULL. Тип и кодировка те же, что у
   // Session.currentQuestionNumber: вопросы целые, кроме условного 4.5
@@ -710,8 +710,8 @@ model OfferEvent {
   // появления этой колонки, NULL: по старым данным прохождения честно
   // не различить. Ноль — событие человека, у которого сессии нет
   // (пришёл только в бот поддержки).
-  attempt    Int?
-  createdAt  DateTime       @default(now())
+  attempt        Int?
+  createdAt      DateTime       @default(now())
 
   @@index([telegramId])
   @@index([type])
@@ -722,11 +722,18 @@ model OfferEvent {
 // PENDING_PAYMENT и PAID заведены заранее, как у заказа PDF: позже между
 // кнопкой «Записаться» и отправкой заявки специалисту встанет оплата.
 enum ConsultStatus {
-  PENDING_PAYMENT
-  PAID
   NEW
   CONTACTED
+  PAID
+  CHAT_CREATED
   DONE
+  // Не дошли до оплаты, причина в lostReason.
+  LOST
+  // Не используются с 29.10.2026. Строки перенесены: PENDING_PAYMENT в
+  // NEW, CANCELED в LOST. Сами значения оставлены: убрать их из типа
+  // PostgreSQL можно только пересозданием типа со сменой колонки, а
+  // ради двух мёртвых значений это лишний риск.
+  PENDING_PAYMENT
   CANCELED
 }
 
@@ -764,17 +771,25 @@ model ConsultRequest {
   // только у заявок с source = AFTER_PDF: по нему специалисту уходит
   // тот же PDF, что получил родитель.
   orderId          Int?
+  // Что родитель хочет обсудить. Свободный текст, обращаемся с ним как
+  // со свободным ответом анкеты: в модель не передаётся, удаляется
+  // вместе с остальными данными.
+  requestText      String?
+  // Почему не дошли до оплаты. Заполняется вместе со статусом LOST.
+  lostReason       String?
   createdAt        DateTime      @default(now())
   contactedAt      DateTime?
+  chatCreatedAt    DateTime?
   doneAt           DateTime?
+  lostAt           DateTime?
   canceledAt       DateTime?
 
   // Под будущую оплату: пока не заполняются.
-  yookassaPaymentId String?
-  paidAt            DateTime?
-  refundedAt        DateTime?
+  yookassaPaymentId   String?
+  paidAt              DateTime?
+  refundedAt          DateTime?
   // Дневник сна за 3–5 дней: без него София не начинает разбор.
-  diaryReceived     Boolean       @default(false)
+  diaryReceived       Boolean   @default(false)
   // Доля Софии. Заполняется вручную при отметке выплаты: процент пока
   // не решён, и считать автоматически нечего.
   consultantPayoutRub Int?
@@ -792,22 +807,22 @@ model ConsultRequest {
 // таблица, а не поле у заказа: предложение одно на родителя, даже если
 // планов он купил несколько, и у него своя жизнь — срок и отказ.
 model UpsellOffer {
-  id           Int      @id @default(autoincrement())
-  telegramId   BigInt   @unique
-  orderId      Int // заказ плана, после которого ушло предложение
-  priceRub     Int // цена со скидкой, показанная этому родителю
-  fullPriceRub Int // обычная цена на момент отправки — для сравнения в тексте
-  sentAt       DateTime @default(now())
-  expiresAt    DateTime // конец дня по Москве, см. src/upsell.ts
+  id               Int       @id @default(autoincrement())
+  telegramId       BigInt    @unique
+  orderId          Int // заказ плана, после которого ушло предложение
+  priceRub         Int // цена со скидкой, показанная этому родителю
+  fullPriceRub     Int // обычная цена на момент отправки — для сравнения в тексте
+  sentAt           DateTime  @default(now())
+  expiresAt        DateTime // конец дня по Москве, см. src/upsell.ts
   // Сообщение с предложением: по нему его можно будет найти и поправить
   // не только из обработчика нажатия.
-  messageId    Int?
-  declinedAt   DateTime?
+  messageId        Int?
+  declinedAt       DateTime?
   // Почему предложение не ушло: родитель остановил бота, закрытый
   // режим и т.п. Повторять такое не нужно.
-  skipReason   String?
+  skipReason       String?
   // Заявка, если родитель всё-таки записался по этому предложению.
-  consultRequestId Int? @unique
+  consultRequestId Int?      @unique
 
   session Session         @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
   consult ConsultRequest? @relation(fields: [consultRequestId], references: [id], onDelete: SetNull)
@@ -835,8 +850,8 @@ model QuizReminder {
   // напоминаний; открытие меню или документов активностью не считается.
   lastActivityAt DateTime @default(now())
 
-  reminder1ScheduledAt DateTime?
-  reminder1SentAt      DateTime?
+  reminder1ScheduledAt    DateTime?
+  reminder1SentAt         DateTime?
   // На каком вопросе человек стоял, когда ушло первое напоминание.
   // Здесь, а не в событии: у OfferEvent нет колонки для данных, а топ-5
   // «где застревают» в /stats строится именно по этому числу.
@@ -846,7 +861,7 @@ model QuizReminder {
   reminder2SentAt      DateTime?
   // Человек ответил хотя бы на один вопрос после первого напоминания:
   // второе отменяется насовсем, даже если он снова остановится.
-  reminder2Cancelled   Boolean  @default(false)
+  reminder2Cancelled   Boolean   @default(false)
 
   remindersStoppedReason String?
 
@@ -889,20 +904,20 @@ enum AttemptStatus {
 // У прохождений, существовавших до миграции, startedAt и lastStep
 // восстановлены приблизительно: точных данных по ним в базе нет.
 model QuestionnaireAttempt {
-  id            Int           @id @default(autoincrement())
-  telegramId    BigInt
-  attemptNumber Int
+  id                   Int           @id @default(autoincrement())
+  telegramId           BigInt
+  attemptNumber        Int
   // Версия анкеты на момент прохождения: вопросы со временем меняются,
   // и без версии старые ответы нельзя честно сравнивать с новыми.
   questionnaireVersion String
-  startedAt     DateTime      @default(now())
-  completedAt   DateTime?
+  startedAt            DateTime      @default(now())
+  completedAt          DateTime?
   // Номер вопроса, на котором человек стоит или остановился. Тот же
   // формат, что у Session.currentQuestionNumber: условный вопрос 4.5
   // так и хранится.
-  lastStep      Float?
-  lastActivityAt DateTime     @default(now())
-  status        AttemptStatus @default(IN_PROGRESS)
+  lastStep             Float?
+  lastActivityAt       DateTime      @default(now())
+  status               AttemptStatus @default(IN_PROGRESS)
 
   session Session @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
 

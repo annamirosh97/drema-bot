@@ -9,6 +9,8 @@
 // до того, как их прописали, уронил бы бота целиком.
 
 import express, { NextFunction, Request, Response } from "express";
+import { join } from "path";
+import { PROJECT_ROOT } from "../prompts";
 import type { Api } from "grammy";
 import { prisma } from "../prisma";
 import { env } from "../env";
@@ -643,6 +645,20 @@ export function startAdminServer(api: Api) {
     if (!authConfigured()) return res.status(503).type("html").send(notConfiguredPage());
     return requireAuth(req, res, next);
   });
+
+  // Картинки, на которые ссылаются сообщения бота: фото Софии в
+  // карточке консультации показывается превью ссылки, а значит его
+  // забирает сам Telegram — без куки и без пароля. Авторизация висит
+  // только на /admin, так что сюда она не достаёт.
+  //
+  // maxAge большой намеренно: адрес версионируется через ?v=, и при
+  // замене фото меняется он, а не содержимое по старому адресу.
+  app.use(
+    "/static",
+    // fallthrough по умолчанию: запрос несуществующего файла уходит
+    // дальше и заканчивается обычной 404, а не стеком в логе.
+    express.static(join(PROJECT_ROOT, "public/static"), { maxAge: "30d" })
+  );
 
   // Юридические документы. Пока это заглушки, но адреса уже уходят
   // людям в сообщениях о согласиях и будут лежать в журнале, поэтому

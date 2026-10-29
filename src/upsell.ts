@@ -35,24 +35,21 @@ const MONTHS = [
   "июля", "августа", "сентября", "октября", "ноября", "декабря",
 ];
 
-// Конец дня по Москве через UPSELL_VALID_DAYS дней. Сдвигаем время в
-// московское, отрезаем часы, прибавляем дни и возвращаемся в UTC —
-// так не нужно полагаться на часовой пояс машины.
-export function expiryFor(sentAt: Date, days = env.UPSELL_VALID_DAYS): Date {
-  const moscow = new Date(sentAt.getTime() + MOSCOW_OFFSET_MS);
-  const midnight = Date.UTC(
-    moscow.getUTCFullYear(),
-    moscow.getUTCMonth(),
-    moscow.getUTCDate() + days + 1
-  );
-  // Полночь следующего дня минус миллисекунда — это конец нужного дня.
-  return new Date(midnight - MOSCOW_OFFSET_MS - 1);
+// Ровно UPSELL_VALID_HOURS часов от отправки предложения. Раньше это
+// был конец дня через неделю, но цена обещана «до {дата, время}», и
+// сутки от сообщения — честная и понятная мера: у всех одинаковая,
+// независимо от того, в какой час пришло предложение.
+export function expiryFor(sentAt: Date, hours = env.UPSELL_VALID_HOURS): Date {
+  return new Date(sentAt.getTime() + hours * 3_600_000);
 }
 
-// «21 октября» — дата последнего дня скидки, тоже по Москве.
+// «30 октября, 15:40» по Москве: со времени, потому что срок теперь
+// считается часами, и одной даты не хватает.
 export function formatOfferDate(expiresAt: Date): string {
   const moscow = new Date(expiresAt.getTime() + MOSCOW_OFFSET_MS);
-  return `${moscow.getUTCDate()} ${MONTHS[moscow.getUTCMonth()]}`;
+  const hh = String(moscow.getUTCHours()).padStart(2, "0");
+  const mm = String(moscow.getUTCMinutes()).padStart(2, "0");
+  return `${moscow.getUTCDate()} ${MONTHS[moscow.getUTCMonth()]}, ${hh}:${mm}`;
 }
 
 // Ссылка на оферту: подставляется в карточки, где её принимают нажатием.
