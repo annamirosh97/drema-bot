@@ -90,7 +90,7 @@ async function telegramIdsToSkip(): Promise<bigint[]> {
   const [offered, consulting] = await Promise.all([
     prisma.upsellOffer.findMany({ select: { telegramId: true } }),
     prisma.consultRequest.findMany({
-      where: { status: { not: "CANCELED" } },
+      where: { status: { notIn: ["LOST", "CANCELED"] } },
       select: { telegramId: true },
     }),
   ]);

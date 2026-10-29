@@ -7,18 +7,23 @@ import { html, page, raw } from "./html";
 // Человеческие подписи вместо значений enum: статусы читает человек, а
 // не код, и «Связались» понятнее, чем CONTACTED.
 const STATUS_LABELS: Record<string, string> = {
-  PENDING_PAYMENT: "ждёт оплаты",
-  PAID: "оплачена",
   NEW: "новая",
-  CONTACTED: "связались",
+  CONTACTED: "написали",
+  PAID: "оплачено",
+  CHAT_CREATED: "чат создан",
   DONE: "завершена",
+  LOST: "не дошли до оплаты",
+  // Не используются с 29.10.2026, остались у перенесённых заявок.
+  PENDING_PAYMENT: "ждёт оплаты",
   CANCELED: "отменена",
 };
 
 const FIRST_CONTACT_LABELS: Record<string, string> = {
   PENDING: "родитель ещё не выбрал",
-  SPECIALIST: "София",
+  TEAM: "команда Дрёмиуса",
   PARENT: "родитель",
+  // Не используется с 29.10.2026: раньше первой писала София.
+  SPECIALIST: "София",
 };
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -90,11 +95,20 @@ function statusButtons(data: ConsultPageData): string {
           <button type="submit" class="secondary">${label}</button>
         </form>`;
 
+  // Статусы идут только вперёд, поэтому кнопка одна — на следующий
+  // шаг. «Не дошли до оплаты» доступна с любого шага до завершения.
+  const NEXT: Record<string, [string, string] | undefined> = {
+    NEW: ["CONTACTED", "Написали"],
+    CONTACTED: ["PAID", "Оплачено"],
+    PAID: ["CHAT_CREATED", "Чат создан"],
+    CHAT_CREATED: ["DONE", "Завершена"],
+  };
+
   const buttons: string[] = [];
-  if (data.status === "NEW") buttons.push(button("CONTACTED", "Связались", "Отметить, что связались?"));
-  if (data.status === "NEW" || data.status === "CONTACTED") {
-    buttons.push(button("DONE", "Консультация завершена", "Закрыть заявку?"));
-    buttons.push(button("CANCELED", "Отменить заявку", "Отменить заявку?"));
+  const next = NEXT[data.status];
+  if (next) {
+    buttons.push(button(next[0], next[1], `Отметить: ${next[1].toLowerCase()}?`));
+    buttons.push(button("LOST", "Не дошли до оплаты", "Закрыть заявку как «не дошли до оплаты»?"));
   }
 
   if (!buttons.length) return html`<p class="muted">Заявка закрыта, менять статус больше нечего.</p>`;

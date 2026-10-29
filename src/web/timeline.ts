@@ -61,6 +61,7 @@ const CONSULT_STATUS: Record<string, string> = {
   NEW: "новая",
   CONTACTED: "связались",
   DONE: "проведена",
+  LOST: "не дошли до оплаты",
   CANCELED: "отменена",
 };
 

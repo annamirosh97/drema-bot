@@ -479,6 +479,8 @@ const CONSULT_STATUSES: [string, string][] = [
   ["NEW", "новая"],
   ["CONTACTED", "связались"],
   ["DONE", "проведена"],
+  ["CHAT_CREATED", "чат создан"],
+  ["LOST", "не дошли до оплаты"],
   ["CANCELED", "отменена"],
 ];
 

@@ -200,17 +200,10 @@ async function askWhatToDiscuss(ctx: Context, telegramId: bigint) {
   });
 }
 
-// Карточка заявки команде собирается на третьем этапе; пока уходит
-// короткое уведомление — в конце пути, когда известно и как связаться,
-// и о чём человек хочет говорить.
+// Карточка заявки уходит в конце пути, когда известно и как связаться,
+// и о чём человек хочет говорить. Сама карточка — ниже по файлу.
 async function notifyTeam(api: Api, request: ConsultRequest) {
-  const who = request.parentUsername
-    ? `@${request.parentUsername}`
-    : request.parentPhone ?? "без username — напишет сам";
-  const what = request.requestText ? `\nЗапрос: «${request.requestText}»` : "";
-  await api
-    .sendMessage(adminChatId(), `🗓 Заявка на консультацию №${request.id}: ${who}${what}`)
-    .catch((error) => console.error("Не удалось сообщить о заявке:", error));
+  await sendRequestCard(api, request.id);
 }
 
 // Родитель прислал контакт. Возвращает false, если ждать его было
@@ -439,19 +432,50 @@ export async function remindAboutConsentOnce(ctx: Context, session: Session) {
   });
 }
 
-// ── Пакет заявки для админа и специалиста ───────────────────────────
+// ── Карточка заявки для команды ─────────────────────────────────────
+
+// Что уже сделано по заявке. Статусы идут только вперёд, поэтому
+// кнопка показывается ровно для следующего шага и для «не дошли».
+const STATUS_LABELS: Record<string, string> = {
+  NEW: "новая",
+  CONTACTED: "написали",
+  PAID: "оплачено",
+  CHAT_CREATED: "чат создан",
+  DONE: "завершена",
+  LOST: "не дошли до оплаты",
+};
+
+const NEXT_STEP: Record<string, { label: string; status: string } | undefined> = {
+  NEW: { label: "Написала", status: "CONTACTED" },
+  CONTACTED: { label: "Оплачено", status: "PAID" },
+  PAID: { label: "Чат создан", status: "CHAT_CREATED" },
+  CHAT_CREATED: { label: "Завершена", status: "DONE" },
+};
+
+const LOST_REASONS: [string, string][] = [
+  ["expensive", "Дорого"],
+  ["changed_mind", "Передумали"],
+  ["silent", "Не отвечает"],
+  ["other", "Другое"],
+];
 
 function statusKeyboard(request: ConsultRequest): InlineKeyboard | undefined {
-  if (request.status === "NEW") {
-    return new InlineKeyboard()
-      .text("Связалась", `consult_contacted_${request.id}`)
-      .row()
-      .text("Консультация завершена", `consult_done_${request.id}`);
+  const next = NEXT_STEP[request.status];
+  // Завершённую и потерянную трогать больше нечем.
+  if (!next) return undefined;
+
+  return new InlineKeyboard()
+    .text(next.label, `consult_set_${request.id}_${next.status}`)
+    .row()
+    .text("Не дошли до оплаты", `consult_lost_${request.id}`);
+}
+
+function lostReasonKeyboard(id: number): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const [code, label] of LOST_REASONS) {
+    keyboard.text(label, `consult_lostreason_${id}_${code}`).row();
   }
-  if (request.status === "CONTACTED") {
-    return new InlineKeyboard().text("Консультация завершена", `consult_done_${request.id}`);
-  }
-  return undefined;
+  return keyboard;
 }
 
 // Как родителя найти: username, телефон, или прямое предупреждение, что
@@ -461,7 +485,7 @@ function parentLine(request: ConsultRequest): string {
   if (request.parentUsername) parts.push(`@${request.parentUsername}`);
   if (request.parentPhone) parts.push(request.parentPhone);
   if (!parts.length) parts.push("без username — напишет сам");
-  return parts.join(", ");
+  return parts.join(" · ");
 }
 
 async function babyAge(telegramId: bigint, attempt: number): Promise<string> {
@@ -471,24 +495,67 @@ async function babyAge(telegramId: bigint, attempt: number): Promise<string> {
   return answer?.answerText ?? "не указан";
 }
 
-// Источник и цену показываем только у заявок со скидкой: у обычных это
-// лишняя строка, которая ничего не добавляет.
-function discountLines(request: ConsultRequest): string {
-  if (request.source !== "AFTER_PDF") return "";
+// Цена и откуда пришла заявка одной строкой: по ней видно, обычная это
+// консультация или со скидкой после плана.
+function priceLine(request: ConsultRequest): string {
+  const kind =
+    request.source === "AFTER_PDF"
+      ? `после плана, скидка вместо ${formatPrice(env.CONSULT_PRICE_RUB)} ₽`
+      : "после разбора";
+  return `Цена: ${formatPrice(request.priceRub)} ₽ · ${kind}`;
+}
+
+function adminLink(telegramId: bigint): string {
+  return env.PUBLIC_BASE_URL ? `${env.PUBLIC_BASE_URL}/admin/users/${telegramId}` : "в админке";
+}
+
+async function buildRequestCard(request: ConsultRequest): Promise<string> {
+  const status =
+    request.status === "LOST" && request.lostReason
+      ? `${STATUS_LABELS.LOST} · ${request.lostReason}`
+      : STATUS_LABELS[request.status] ?? request.status;
+
   return (
-    `\nИсточник: после покупки PDF` +
-    `\nЦена: ${formatPrice(request.priceRub)} ₽ (скидка)`
+    `🗓 Заявка на консультацию №${request.id}\n` +
+    `Родитель: ${parentLine(request)}\n` +
+    `Малыш: ${await babyAge(request.telegramId, request.attempt)} мес\n` +
+    `Запрос: ${request.requestText ? `«${request.requestText}»` : "не указан"}\n` +
+    `${priceLine(request)}\n` +
+    `Статус: ${status}\n` +
+    `Анкета и разбор: ${adminLink(request.telegramId)}`
   );
 }
 
-async function buildSummary(request: ConsultRequest): Promise<string> {
-  return (
-    `🗓 Новая заявка на консультацию #${request.id}\n` +
-    `Родитель: ${parentLine(request)}\n` +
-    `Кто пишет первым: ${firstContactLabel(request)}\n` +
-    `Возраст малыша: ${await babyAge(request.telegramId, request.attempt)}` +
-    discountLines(request)
-  );
+// Кому уходит карточка: админу всегда, аккаунту команды — если задан и
+// если он нажимал /start у бота.
+function teamChatIds(): number[] {
+  const ids = [adminChatId()];
+  const team = Number(env.TEAM_TELEGRAM_ID);
+  if (env.TEAM_TELEGRAM_ID && Number.isFinite(team) && team !== adminChatId()) ids.push(team);
+  return ids;
+}
+
+// Карточка заявки и готовый текст первого сообщения. Шаблон уходит
+// моноширинным блоком: нажатие копирует его целиком.
+export async function sendRequestCard(api: Api, requestId: number): Promise<void> {
+  const request = await prisma.consultRequest.findUnique({ where: { id: requestId } });
+  if (!request) return console.error(`Заявка #${requestId} не найдена, карточка не отправлена.`);
+
+  const card = await buildRequestCard(request);
+  const markup = statusKeyboard(request);
+
+  for (const chatId of teamChatIds()) {
+    try {
+      await api.sendMessage(chatId, card, markup ? { reply_markup: markup } : undefined);
+      await api.sendMessage(chatId, `<code>${escapeHtml(texts.teamFirstMessage)}</code>`, {
+        parse_mode: "HTML",
+      });
+    } catch (error) {
+      // Аккаунт команды мог не нажать /start — это не повод терять
+      // заявку: у админа она всё равно есть.
+      console.error(`Не удалось отправить карточку заявки #${requestId} в чат ${chatId}:`, error);
+    }
+  }
 }
 
 // Полный пакет текстом: с ним специалист начинает работу, не задавая
@@ -553,40 +620,69 @@ async function planFile(
 // Отправляет заявку админу и, если задан её Telegram ID, специалисту.
 // Ничего не бросает наружу: заявка уже создана, и сбой отправки не
 // должен выглядеть для родителя как ошибка записи.
+// Пакет Софии: анкета, разбор и запрос родителя. Уходит только после
+// оплаты и только если родитель разрешил передать данные — запись
+// SPECIALIST_TRANSFER в журнале. До оплаты Софии не нужно ничего, а
+// родитель ещё может передумать.
+async function transferAllowed(requestId: number): Promise<boolean> {
+  const record = await prisma.consentRecord.findFirst({
+    where: { type: "SPECIALIST_TRANSFER", action: "GRANTED", relatedConsultRequestId: requestId },
+  });
+  return Boolean(record);
+}
+
 export async function sendConsultPackage(api: Api, requestId: number): Promise<void> {
   const request = await prisma.consultRequest.findUnique({ where: { id: requestId } });
   if (!request) return console.error(`Заявка #${requestId} не найдена, пакет не отправлен.`);
 
-  let summary: string;
-  let packageText: string;
-  try {
-    summary = await buildSummary(request);
-    packageText = await buildConsultPackage(request);
-  } catch (error) {
-    console.error(`Не удалось собрать пакет заявки #${requestId}:`, error);
+  if (request.status !== "PAID" && request.status !== "CHAT_CREATED" && request.status !== "DONE") {
+    return console.error(`Заявка #${requestId} не оплачена, пакет не отправлен.`);
+  }
+
+  if (!(await transferAllowed(requestId))) {
     await api
-      .sendMessage(adminChatId(), `⚠️ Заявка #${requestId} создана, но пакет собрать не вышло: ${error}`)
+      .sendMessage(
+        adminChatId(),
+        `⚠️ Заявка №${requestId}: в журнале нет согласия на передачу данных, пакет не отправлен.`
+      )
       .catch(() => {});
     return;
   }
 
-  const markup = statusKeyboard(request);
-  const fileName = `Zayavka_${request.id}.txt`;
-  // Готовый план лежит в базе с момента отправки родителю, так что
-  // специалисту он уходит без повторного рендера. Если по какой-то
-  // причине файла нет, заявку это не ломает — уйдёт без него.
-  const plan = await planFile(request);
-
-  async function sendTo(chatId: number) {
-    await api.sendMessage(chatId, summary, markup ? { reply_markup: markup } : undefined);
-    await api.sendDocument(chatId, new InputFile(Buffer.from(packageText, "utf8"), fileName));
-    if (plan) await api.sendDocument(chatId, new InputFile(plan.bytes, plan.name));
+  let packageText: string;
+  try {
+    packageText = await buildConsultPackage(request);
+  } catch (error) {
+    console.error(`Не удалось собрать пакет заявки #${requestId}:`, error);
+    await api
+      .sendMessage(adminChatId(), `⚠️ Заявка №${requestId}: пакет собрать не удалось, см. логи.`)
+      .catch(() => {});
+    return;
   }
 
-  try {
-    await sendTo(adminChatId());
-  } catch (error) {
-    console.error(`Не удалось отправить заявку #${requestId} админу:`, error);
+  const fileName = `Zayavka_${request.id}.txt`;
+  // Готовый план лежит в базе с момента отправки родителю, так что
+  // уходит без повторного рендера. Нет файла — заявку это не ломает.
+  const plan = await planFile(request);
+
+  const intro = texts.teamIntroMessage(
+    request.parentUsername ? `@${request.parentUsername}` : "родитель",
+    await babyAge(request.telegramId, request.attempt),
+    request.requestText ?? "обсудим в чате"
+  );
+
+  async function sendTo(chatId: number) {
+    await api.sendDocument(chatId, new InputFile(Buffer.from(packageText, "utf8"), fileName));
+    if (plan) await api.sendDocument(chatId, new InputFile(plan.bytes, plan.name));
+    await api.sendMessage(chatId, `<code>${escapeHtml(intro)}</code>`, { parse_mode: "HTML" });
+  }
+
+  for (const chatId of teamChatIds()) {
+    try {
+      await sendTo(chatId);
+    } catch (error) {
+      console.error(`Не удалось отправить пакет заявки #${requestId} в чат ${chatId}:`, error);
+    }
   }
 
   const specialist = specialistChatId();
@@ -596,15 +692,15 @@ export async function sendConsultPackage(api: Api, requestId: number): Promise<v
     await sendTo(specialist);
     await logEvent(request.telegramId, "consult_sent_to_specialist");
   } catch (error) {
-    // Бот может писать специалисту только после того, как она нажала
-    // /start. Пока этого нет, заявка всё равно у админа — её можно
-    // передать вручную.
-    console.error(`Не удалось отправить заявку #${requestId} специалисту:`, error);
+    // Бот может писать Софии только после того, как она нажала /start.
+    // Пока этого нет, пакет всё равно у команды — его можно передать
+    // вручную.
+    console.error(`Не удалось отправить пакет заявки #${requestId} специалисту:`, error);
     await api
       .sendMessage(
         adminChatId(),
-        `⚠️ Заявку #${requestId} не удалось отправить специалисту: ${error}\n\n` +
-          `Обычно это значит, что она ещё не нажимала /start у бота. Передай заявку вручную.`
+        `⚠️ Пакет заявки №${requestId} не ушёл Софии: ${error}\n\n` +
+          `Обычно это значит, что она ещё не нажимала /start у бота.`
       )
       .catch(() => {});
   }
@@ -612,50 +708,95 @@ export async function sendConsultPackage(api: Api, requestId: number): Promise<v
 
 // ── Смена статуса ───────────────────────────────────────────────────
 
-// Кнопки «Связалась» и «Консультация завершена» под заявкой. Нажать их
-// могут и админ, и специалист — у каждой своя копия сообщения.
+// Кнопки под карточкой жмут админ, аккаунт команды и Софии — у каждого
+// своя копия сообщения.
 export function canChangeConsultStatus(telegramId?: number): boolean {
   if (telegramId == null) return false;
   if (String(telegramId) === env.ADMIN_TELEGRAM_ID) return true;
+  if (env.TEAM_TELEGRAM_ID && String(telegramId) === env.TEAM_TELEGRAM_ID) return true;
   return specialistChatId() === telegramId;
 }
 
-export type ConsultStatusChange = "CONTACTED" | "DONE" | "CANCELED";
+export type ConsultStatusChange = "CONTACTED" | "PAID" | "CHAT_CREATED" | "DONE" | "LOST";
 
 // Отметку времени ставим ту, которая соответствует новому статусу:
 // прежние остаются как были, чтобы по заявке было видно всю её историю.
-export async function setConsultStatus(id: number, status: ConsultStatusChange) {
-  const stamps = {
+export async function setConsultStatus(
+  id: number,
+  status: ConsultStatusChange,
+  lostReason?: string
+) {
+  const stamps: Record<ConsultStatusChange, Record<string, unknown>> = {
     CONTACTED: { contactedAt: new Date() },
+    PAID: { paidAt: new Date() },
+    CHAT_CREATED: { chatCreatedAt: new Date() },
     DONE: { doneAt: new Date() },
-    CANCELED: { canceledAt: new Date() },
-  }[status];
+    LOST: { lostAt: new Date(), lostReason: lostReason ?? "другое" },
+  };
 
-  return prisma.consultRequest.update({ where: { id }, data: { status, ...stamps } });
+  const updated = await prisma.consultRequest.update({
+    where: { id },
+    data: { status, ...stamps[status] },
+  });
+  await logEvent(updated.telegramId, "consult_status_changed");
+
+  // Пакет Софии уходит ровно в момент оплаты и ровно один раз: дальше
+  // статусы меняются, а слать его заново незачем.
+  return updated;
+}
+
+// Перерисовывает карточку после смены статуса: строка состояния и
+// кнопки должны соответствовать тому, что уже сделано.
+async function refreshCard(ctx: Context, request: ConsultRequest) {
+  const markup = statusKeyboard(request);
+  try {
+    await ctx.editMessageText(await buildRequestCard(request), {
+      reply_markup: markup,
+    });
+  } catch (error) {
+    // Сообщение могли удалить или оно слишком старое для правки.
+    if (!String(error).includes("message is not modified")) {
+      console.error(`Не удалось обновить карточку заявки #${request.id}:`, error);
+    }
+  }
 }
 
 // Обработчик нажатия в Telegram. Сессию нажавшего не трогает: кнопку
-// жмёт специалист, и своей анкеты у неё в боте может не быть вовсе.
+// жмёт команда, и своей анкеты у неё в боте может не быть вовсе.
 export async function handleConsultStatusCallback(ctx: Context) {
   const data = ctx.callbackQuery?.data ?? "";
-  const match = data.match(/^consult_(contacted|done)_(\d+)$/);
-  if (!match) return;
+  const set = data.match(/^consult_set_(\d+)_([A-Z_]+)$/);
+  const lost = data.match(/^consult_lost_(\d+)$/);
+  const reason = data.match(/^consult_lostreason_(\d+)_([a-z_]+)$/);
+  if (!set && !lost && !reason) return;
 
   if (!canChangeConsultStatus(ctx.from?.id)) {
-    return ctx.answerCallbackQuery({ text: "Эта кнопка не для вас.", show_alert: true }).catch(() => {});
+    return ctx
+      .answerCallbackQuery({ text: "Эта кнопка не для вас.", show_alert: true })
+      .catch(() => {});
   }
 
-  const status = match[1] === "contacted" ? "CONTACTED" : "DONE";
-  const id = Number(match[2]);
+  // «Не дошли до оплаты» — не статус, а вопрос о причине: подменяем
+  // кнопки под той же карточкой.
+  if (lost) {
+    const id = Number(lost[1]);
+    await ctx.answerCallbackQuery({ text: "Почему не дошли?" }).catch(() => {});
+    return ctx.editMessageReplyMarkup({ reply_markup: lostReasonKeyboard(id) }).catch(() => {});
+  }
+
+  const id = Number((set ?? reason)![1]);
+  const status = (set ? set[2] : "LOST") as ConsultStatusChange;
+  const why = reason
+    ? LOST_REASONS.find(([code]) => code === reason[2])?.[1].toLowerCase()
+    : undefined;
 
   try {
-    const updated = await setConsultStatus(id, status);
-    await ctx.answerCallbackQuery({
-      text: status === "CONTACTED" ? `Заявка #${id}: связались.` : `Заявка #${id} закрыта.`,
-    });
-    // Оставляем под сообщением только те кнопки, которые ещё имеют смысл.
-    const markup = statusKeyboard(updated);
-    await ctx.editMessageReplyMarkup(markup ? { reply_markup: markup } : undefined).catch(() => {});
+    const updated = await setConsultStatus(id, status, why);
+    await ctx.answerCallbackQuery({ text: `Заявка №${id}: ${STATUS_LABELS[status]}.` });
+    await refreshCard(ctx, updated);
+
+    // Пакет Софии — ровно в момент оплаты.
+    if (status === "PAID") await sendConsultPackage(ctx.api, id);
   } catch (error) {
     console.error(`Не удалось сменить статус заявки #${id}:`, error);
     await ctx

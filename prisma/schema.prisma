@@ -658,6 +658,7 @@ enum OfferEventType {
   consult_wrong_contact
   consult_signup_duplicate
   consult_sent_to_specialist
+  consult_status_changed
 
   // CSAT: сама оценка и текст остаются в ответах 30 и 31.
   csat_rated

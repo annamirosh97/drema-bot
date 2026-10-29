@@ -123,7 +123,7 @@ export async function loadQueue(filter: TaskType | ""): Promise<QueueData> {
       include: { draft: { select: { approvedAt: true } }, session: { select: { firstName: true } } },
     }),
     prisma.consultRequest.findMany({
-      where: { status: { notIn: ["CANCELED"] } },
+      where: { status: { notIn: ["LOST", "CANCELED"] } },
       include: { session: { select: { firstName: true } } },
     }),
     prisma.session.findMany({

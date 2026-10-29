@@ -26,7 +26,12 @@ import { PdfContent, ScheduleRow, ScheduleVariant } from "../paidPdf";
 import { RelaxationGroup, isRelaxationMemoReady, readRelaxationMemo } from "../prompts";
 import { renderOrderPage, renderPreview } from "./pages";
 import { renderConsultPage } from "./consultPages";
-import { ConsultStatusChange, buildConsultPackage, setConsultStatus } from "../consult";
+import {
+  ConsultStatusChange,
+  buildConsultPackage,
+  sendConsultPackage,
+  setConsultStatus,
+} from "../consult";
 import type { LegalDocType } from "@prisma/client";
 import { activeDocument, readLegalText } from "../legalDocs";
 import { renderLegalPage } from "./legalPage";
@@ -1393,18 +1398,24 @@ export function startAdminServer(api: Api) {
   app.post("/admin/consults/:id/status", async (req, res) => {
     const id = Number(req.params.id);
     const status = String(req.body.status ?? "");
-    if (!["CONTACTED", "DONE", "CANCELED"].includes(status)) {
+    if (!["CONTACTED", "PAID", "CHAT_CREATED", "DONE", "LOST"].includes(status)) {
       return res.status(400).send("Неизвестный статус.");
     }
+    const lostReason = String(req.body.lostReason ?? "").trim() || undefined;
 
     const before = await prisma.consultRequest.findUnique({
       where: { id },
       select: { status: true },
     });
-    await setConsultStatus(id, status as ConsultStatusChange);
+    await setConsultStatus(id, status as ConsultStatusChange, lostReason);
     await logAdminAction(adminId(req), "consult_status_changed", "consult", String(id), {
       status: { from: before?.status ?? null, to: status },
+      ...(lostReason ? { lostReason } : {}),
     });
+
+    // Пакет Софии уходит в момент оплаты — из админки так же, как из
+    // кнопки в Telegram.
+    if (status === "PAID") await sendConsultPackage(api, id);
     res.redirect(`/admin/consults/${id}?status=1`);
   });
 
