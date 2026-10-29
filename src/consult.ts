@@ -27,7 +27,7 @@ import {
   consultConsentKeyboard,
   consultRequestKeyboard,
 } from "./keyboards";
-import { escapeHtml, replyStatic } from "./send";
+import { escapeHtml, replyStatic, sendStatic } from "./send";
 import { logEvent } from "./events";
 
 // Заявки в этих статусах считаются живыми: пока такая есть, вторую не
@@ -266,7 +266,13 @@ export async function takeConsultSelfWrite(ctx: Context, session: Session): Prom
 
   await prisma.consultRequest.update({
     where: { id: request.id },
-    data: { firstContact: "PARENT", parentUsername: ctx.from?.username ?? request.parentUsername },
+    data: {
+      firstContact: "PARENT",
+      parentUsername: ctx.from?.username ?? request.parentUsername,
+      // Отметка согласия нужна и здесь: от неё отсчитывается ожидание
+      // ответа на второй шаг.
+      contactConsentAt: new Date(),
+    },
   });
 
   const saved = await recordSpecialistTransfer(
@@ -287,6 +293,12 @@ export async function takeConsultSelfWrite(ctx: Context, session: Session): Prom
 // Конец пути: подтверждение родителю и уведомление команде. Текст
 // подтверждения зависит от того, кто пишет первым.
 async function finishConsultRequest(ctx: Context, session: Session, request: ConsultRequest) {
+  // Отмечаем до отправки: если уведомление не уйдёт, второй раз его
+  // пошлёт фоновая проверка, а два одинаковых — хуже, чем ни одного.
+  const finished = await prisma.consultRequest.update({
+    where: { id: request.id },
+    data: { teamNotifiedAt: new Date() },
+  });
   await prisma.session.update({
     where: { telegramId: session.telegramId },
     data: { stage: "FAKE_DOOR_OFFER" },
@@ -302,7 +314,72 @@ async function finishConsultRequest(ctx: Context, session: Session, request: Con
       : texts.consultRequestSelfWrite(escapeHtml(env.TEAM_USERNAME), request.id),
     { reply_markup: { remove_keyboard: true } }
   );
-  await notifyTeam(ctx.api, request);
+  await notifyTeam(ctx.api, finished);
+}
+
+// ── Заявки, брошенные на втором шаге ────────────────────────────────
+//
+// Контакт родитель уже оставил — значит, команде есть с чем работать,
+// и держать такую заявку невидимой из-за неотвеченного вопроса нельзя.
+// Через CONSULT_REQUEST_TIMEOUT_MIN минут считаем её законченной, будто
+// нажали «Пропустить»: родитель получает подтверждение, команда —
+// уведомление.
+//
+// Проверка идёт по базе, а не по таймеру в памяти: перезапуск бота не
+// должен терять заявки, а других способов узнать про них нет.
+export async function finishStaleConsultRequests(api: Api): Promise<void> {
+  const deadline = new Date(Date.now() - env.CONSULT_REQUEST_TIMEOUT_MIN * 60_000);
+
+  const stale = await prisma.consultRequest.findMany({
+    where: {
+      status: "NEW",
+      teamNotifiedAt: null,
+      firstContact: { not: "PENDING" },
+      contactConsentAt: { lte: deadline },
+    },
+    include: { session: true },
+  });
+
+  for (const request of stale) {
+    try {
+      const finished = await prisma.consultRequest.update({
+        where: { id: request.id },
+        data: { teamNotifiedAt: new Date() },
+      });
+
+      // Родитель мог застрять на шаге запроса: возвращаем его к офферу,
+      // иначе следующее его сообщение уйдёт в пустоту.
+      if (request.session.stage === "CONSULT_REQUEST") {
+        await prisma.session.update({
+          where: { telegramId: request.telegramId },
+          data: { stage: "FAKE_DOOR_OFFER" },
+        });
+      }
+
+      await sendStatic(
+        api,
+        request.session.chatId,
+        request.firstContact === "TEAM"
+          ? texts.consultRequestAccepted(escapeHtml(env.TEAM_USERNAME))
+          : texts.consultRequestSelfWrite(escapeHtml(env.TEAM_USERNAME), request.id),
+        { reply_markup: { remove_keyboard: true } }
+      );
+      await logEvent(request.telegramId, "consult_request_skipped");
+      await notifyTeam(api, finished);
+    } catch (error) {
+      console.error(`Не удалось закрыть заявку #${request.id}:`, error);
+    }
+  }
+}
+
+const CHECK_INTERVAL_MS = 60 * 1000;
+
+export function startConsultScheduler(api: Api) {
+  setInterval(() => {
+    void finishStaleConsultRequests(api).catch((error) =>
+      console.error("Проверка брошенных заявок не удалась:", error)
+    );
+  }, CHECK_INTERVAL_MS);
 }
 
 // Родитель написал, что хочет обсудить. Возвращает false, если ждать

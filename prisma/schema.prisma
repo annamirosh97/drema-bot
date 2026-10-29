@@ -786,6 +786,10 @@ model ConsultRequest {
   // Почему не дошли до оплаты. Заполняется вместе со статусом LOST.
   lostReason       String?
   createdAt        DateTime      @default(now())
+  // Когда команде ушло уведомление. Пока пусто, заявка считается
+  // недорассказанной: родитель оставил контакт, но ещё не ответил,
+  // что хочет обсудить.
+  teamNotifiedAt   DateTime?
   contactedAt      DateTime?
   chatCreatedAt    DateTime?
   doneAt           DateTime?

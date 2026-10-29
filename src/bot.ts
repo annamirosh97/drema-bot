@@ -7,7 +7,7 @@ import {
   handleMenuCommand,
   handleResetCommand,
 } from "./engine";
-import { handleConsultStatusCallback } from "./consult";
+import { handleConsultStatusCallback, startConsultScheduler } from "./consult";
 import { registerAdminCommands, handleAdminFlowMessage } from "./admin";
 import { startAdminServer } from "./web/server";
 import { startUpsellScheduler } from "./upsell";
@@ -135,6 +135,9 @@ async function main() {
   startAdminServer(bot.api);
   // Предложение консультации со скидкой через пару минут после плана.
   startUpsellScheduler(bot.api);
+  // Заявки, брошенные на вопросе «что хотите обсудить»: контакт уже
+  // есть, и через полчаса такая заявка считается законченной.
+  startConsultScheduler(bot.api);
   // Отложенные вопросы: о разборе через сутки, о плане через неделю.
   startFeedbackScheduler(bot.api);
   // Напоминания тем, кто остановился посреди анкеты: через 3 и 24 часа.
