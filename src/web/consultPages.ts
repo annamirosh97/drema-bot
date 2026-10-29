@@ -64,7 +64,21 @@ export interface ConsultPageData {
   contactConsentAt: Date | null;
   firstContact: string;
   contactedAt: Date | null;
+  paidAt: Date | null;
+  chatCreatedAt: Date | null;
   doneAt: Date | null;
+  lostAt: Date | null;
+  lostReason: string | null;
+  // Когда команде ушла карточка. Пусто — заявка ещё не дорассказана.
+  teamNotifiedAt: Date | null;
+  // Что родитель хочет обсудить, целиком.
+  requestText: string | null;
+  // Когда родитель разрешил передать данные Софии. Без этой записи
+  // пакет не уходит, и в карточке это должно быть видно.
+  transferAt: Date | null;
+  // Докуда действует цена со скидкой; только у заявок после плана.
+  discountUntil: Date | null;
+  fullPriceRub: number;
   // Отметки, которых требует очередь админки.
   diaryReceived: boolean;
   payoutRub: number | null;
@@ -164,8 +178,14 @@ export function renderConsultPage(data: ConsultPageData): string {
         <tr><th>Telegram</th><td>${data.parentUsername ? `@${data.parentUsername}` : "без username"}</td></tr>
         <tr><th>Телефон</th><td>${data.parentPhone ?? "не передан"}</td></tr>
         <tr><th>Согласие на передачу контакта</th><td>${when(data.contactConsentAt)}</td></tr>
+        <tr><th>Передача данных Софии</th><td>${raw(
+          data.transferAt
+            ? html`разрешена ${when(data.transferAt)}`
+            : html`<span class="pill warn">нет записи — пакет не уйдёт</span>`
+        )}</td></tr>
         <tr><th>Пишет первым</th><td>${firstContactLabel(data.firstContact)}</td></tr>
         <tr><th>Возраст малыша</th><td>${data.babyAge}</td></tr>
+        <tr><th>Запрос</th><td>${data.requestText ?? "не указан"}</td></tr>
         <tr><th>Telegram ID</th><td class="muted">#${data.telegramId}</td></tr>
       </table>
     </div>
@@ -186,10 +206,27 @@ export function renderConsultPage(data: ConsultPageData): string {
       <table>
         <tr><th>Сейчас</th><td>${statusLabel(data.status)}</td></tr>
         <tr><th>Создана</th><td>${when(data.createdAt)}</td></tr>
-        <tr><th>Связались</th><td>${when(data.contactedAt)}</td></tr>
+        <tr><th>Карточка команде</th><td>${when(data.teamNotifiedAt)}</td></tr>
+        <tr><th>Написали</th><td>${when(data.contactedAt)}</td></tr>
+        <tr><th>Оплачено</th><td>${when(data.paidAt)}</td></tr>
+        <tr><th>Чат создан</th><td>${when(data.chatCreatedAt)}</td></tr>
         <tr><th>Завершена</th><td>${when(data.doneAt)}</td></tr>
-        <tr><th>Источник</th><td>${sourceLabel(data.source)}</td></tr>
-        <tr><th>Цена</th><td>${data.priceRub} ₽</td></tr>
+        ${raw(
+          data.lostAt
+            ? html`<tr><th>Не дошли до оплаты</th><td>${when(data.lostAt)} · ${data.lostReason ?? "другое"}</td></tr>`
+            : ""
+        )}
+        <tr><th>Тип</th><td>${sourceLabel(data.source)}</td></tr>
+        <tr><th>Цена</th><td>${raw(
+          data.source === "AFTER_PDF"
+            ? html`${data.priceRub} ₽ <span class="muted">вместо ${data.fullPriceRub} ₽</span>`
+            : html`${data.priceRub} ₽`
+        )}</td></tr>
+        ${raw(
+          data.discountUntil
+            ? html`<tr><th>Скидка действует до</th><td>${when(data.discountUntil)}</td></tr>`
+            : ""
+        )}
         ${raw(
           data.orderId == null
             ? ""

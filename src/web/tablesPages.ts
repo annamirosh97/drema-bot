@@ -484,21 +484,53 @@ const CONSULT_STATUSES: [string, string][] = [
   ["CANCELED", "отменена"],
 ];
 
+const CONSULT_SOURCES: [string, string][] = [
+  ["OFFER", "Консультация"],
+  ["AFTER_PDF", "Консультация после плана, скидка"],
+];
+
 export function renderConsultsTablePage(data: {
   chrome: ChromeData;
   rows: ConsultTableRow[];
-  filters: { status: string; notContacted: boolean; notPaidOut: boolean };
+  totals: { paidCount: number; paidRub: number };
+  filters: { status: string; source: string; notContacted: boolean; notPaidOut: boolean };
+  fullPriceRub: number;
 }): string {
+  // У заявки со скидкой показываем и обычную цену: без неё непонятно,
+  // сколько именно уступили.
+  const price = (r: ConsultTableRow) =>
+    r.source === "AFTER_PDF"
+      ? html`${money(r.priceRub)} <span class="muted">(вместо ${money(data.fullPriceRub)})</span>`
+      : money(r.priceRub);
+
+  const status = (r: ConsultTableRow) =>
+    r.status === "LOST" && r.lostReason
+      ? html`${LABEL(CONSULT_STATUSES, r.status)} <span class="muted">· ${r.lostReason}</span>`
+      : LABEL(CONSULT_STATUSES, r.status);
+
+  // Часы ожидания с подсветкой: три часа на первое сообщение, двое
+  // суток от него до оплаты.
+  const waiting = (r: ConsultTableRow) =>
+    r.waitingHours == null
+      ? escape("—")
+      : r.waitingOverdue
+        ? html`<span class="pill warn">${r.waitingHours} ч</span>`
+        : html`${r.waitingHours} ч`;
+
   const rows = data.rows.map(
     (r) => html`<tr>
-      <td><a href="/admin/consults/${r.id}">#${r.id}</a></td>
-      <td><a href="/admin/users/${r.telegramId}">${r.parent}</a></td>
-      <td>${LABEL(CONSULT_STATUSES, r.status)}</td>
-      <td class="muted">${when(r.createdAt)}</td>
-      <td class="muted">${when(r.paidAt)}</td>
-      <td class="muted">${when(r.contactedAt)}</td>
+      <td><a href="/admin/consults/${r.id}">№${r.id}</a></td>
+      <td class="muted" style="white-space:nowrap">${when(r.createdAt)}</td>
+      <td>${LABEL(CONSULT_SOURCES, r.source)}</td>
+      <td style="white-space:nowrap">${raw(price(r))}</td>
+      <td>
+        <a href="/admin/users/${r.telegramId}">${r.parent}</a>
+        <span class="muted">· ${r.contact}</span>
+      </td>
+      <td>${cut(r.request)}</td>
+      <td>${raw(status(r))}</td>
+      <td>${raw(waiting(r))}</td>
       <td>${yesNo(r.diaryReceived)}</td>
-      <td class="muted">${when(r.doneAt)}</td>
       <td>
         ${raw(
           r.payoutPaidAt
@@ -514,14 +546,15 @@ export function renderConsultsTablePage(data: {
   const table = data.rows.length
     ? html`<table>
         <tr>
-          <th>Заявка</th>
+          <th>№</th>
+          <th>${raw(sortHeader(data.chrome, "created", "Дата"))}</th>
+          <th>Тип</th>
+          <th>${raw(sortHeader(data.chrome, "price", "Цена"))}</th>
           <th>${raw(sortHeader(data.chrome, "parent", "Родитель"))}</th>
+          <th>Запрос</th>
           <th>${raw(sortHeader(data.chrome, "status", "Статус"))}</th>
-          <th>${raw(sortHeader(data.chrome, "created", "Запрос"))}</th>
-          <th>Оплата</th>
-          <th>${raw(sortHeader(data.chrome, "contacted", "София связалась"))}</th>
+          <th>${raw(sortHeader(data.chrome, "waiting", "Ждёт"))}</th>
           <th>Дневник</th>
-          <th>${raw(sortHeader(data.chrome, "done", "Проведена"))}</th>
           <th>Выплата</th>
         </tr>
         ${raw(rows.join(""))}
@@ -530,18 +563,20 @@ export function renderConsultsTablePage(data: {
 
   const filters = [
     select("status", data.filters.status, CONSULT_STATUSES, "любой статус"),
-    checkbox("notContacted", data.filters.notContacted, "не связались"),
+    select("source", data.filters.source, CONSULT_SOURCES, "любой тип"),
+    checkbox("notContacted", data.filters.notContacted, "не писали"),
     checkbox("notPaidOut", data.filters.notPaidOut, "не выплачено"),
   ].join("");
 
   return tablePage({
     title: "Консультации",
     heading: "Консультации",
-    note: `Найдено ${data.chrome.total}`,
+    note:
+      `Найдено ${data.chrome.total} · дошло до оплаты ${data.totals.paidCount} ` +
+      `на ${money(data.totals.paidRub)}`,
     chrome: data.chrome,
     filters,
     table,
   });
 }
-
 export { cut, escape };

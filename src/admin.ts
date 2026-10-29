@@ -189,6 +189,105 @@ export function buildMenuBlock(events: { type: string }[], days: number): string
 //
 // Топ-5 вопросов, на которых останавливаются, берём из QuizReminder, а
 // не из событий: у OfferEvent нет колонки для номера вопроса.
+// Воронка консультаций: от карточки до завершённой заявки.
+//
+// Считается по заявкам, а не по событиям: статусы меняет команда уже
+// после того, как родитель ушёл из бота, и событие «оплатили» в его
+// ленте не появится. По событиям берём только два первых шага — показ
+// карточки и начало заявки, их в заявках нет.
+export interface ConsultStatsInput {
+  cardOpened: number;
+  started: number;
+  requests: {
+    source: string;
+    status: string;
+    lostReason: string | null;
+    createdAt: Date;
+    contactedAt: Date | null;
+    paidAt: Date | null;
+    chatCreatedAt: Date | null;
+    doneAt: Date | null;
+  }[];
+  days: number;
+}
+
+function median(values: number[]): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function hoursBetween(from: Date, to: Date): number {
+  return (to.getTime() - from.getTime()) / 3_600_000;
+}
+
+export function buildConsultBlock(input: ConsultStatsInput): string {
+  const { requests } = input;
+  const pct = (part: number, whole: number) =>
+    whole ? ` (${Math.round((part / whole) * 100)}%)` : "";
+
+  // «Дошёл до шага» считаем по датам, а не по текущему статусу:
+  // заявка, которую закрыли как «не дошли до оплаты», всё равно
+  // добралась до первого сообщения, и выкидывать её из воронки
+  // значило бы занижать каждый шаг до самого отказа.
+  const line = (label: string, value: number, previous: number) =>
+    `  ${label}: ${value}${pct(value, previous)}`;
+
+  const steps = (list: typeof requests) => {
+    const contacted = list.filter((r) => r.contactedAt).length;
+    const paid = list.filter((r) => r.paidAt).length;
+    const chat = list.filter((r) => r.chatCreatedAt).length;
+    const done = list.filter((r) => r.doneAt).length;
+    return [
+      line("оставили контакт", list.length, list.length),
+      line("написали", contacted, list.length),
+      line("оплатили", paid, contacted),
+      line("чат создан", chat, paid),
+      line("завершена", done, chat),
+    ].join("\n");
+  };
+
+  const lines = [
+    `Консультации за ${input.days} дн.:`,
+    `  открыли карточку: ${input.cardOpened}`,
+    `  начали заявку: ${input.started}${pct(input.started, input.cardOpened)}`,
+    steps(requests),
+  ];
+
+  // Отдельно по источнику: у заявок после плана своя цена и свой путь,
+  // и смешивать их конверсию с обычными нельзя.
+  for (const [source, label] of [["OFFER", "после разбора"], ["AFTER_PDF", "после плана"]]) {
+    const list = requests.filter((r) => r.source === source);
+    if (list.length) lines.push(`  ${label}:`, steps(list).replace(/^ {2}/gm, "    "));
+  }
+
+  const lost = requests.filter((r) => r.status === "LOST");
+  if (lost.length) {
+    const byReason = new Map<string, number>();
+    for (const r of lost) {
+      const reason = r.lostReason ?? "другое";
+      byReason.set(reason, (byReason.get(reason) ?? 0) + 1);
+    }
+    lines.push(`  не дошли до оплаты: ${lost.length}`);
+    for (const [reason, count] of [...byReason].sort((a, b) => b[1] - a[1])) {
+      lines.push(`    ${reason}: ${count}`);
+    }
+  }
+
+  const toContacted = median(
+    requests.filter((r) => r.contactedAt).map((r) => hoursBetween(r.createdAt, r.contactedAt!))
+  );
+  const toPaid = median(
+    requests.filter((r) => r.paidAt).map((r) => hoursBetween(r.createdAt, r.paidAt!))
+  );
+  const hours = (value: number | null) => (value == null ? "—" : `${value.toFixed(1)} ч`);
+  lines.push(`  медиана до первого сообщения: ${hours(toContacted)}`);
+  lines.push(`  медиана до оплаты: ${hours(toPaid)}`);
+
+  return lines.join("\n");
+}
+
 export function buildQuizReminderBlock(
   events: { telegramId: bigint; type: string }[],
   stopQuestions: (number | null)[],
@@ -703,7 +802,19 @@ export function registerAdminCommands(bot: Bot) {
         select: { telegramId: true, answerText: true },
       }),
       prisma.pdfDraft.findMany({ select: { orderId: true, editedContent: true } }),
-      prisma.consultRequest.findMany({ select: { telegramId: true } }),
+      prisma.consultRequest.findMany({
+        select: {
+          telegramId: true,
+          source: true,
+          status: true,
+          lostReason: true,
+          createdAt: true,
+          contactedAt: true,
+          paidAt: true,
+          chatCreatedAt: true,
+          doneAt: true,
+        },
+      }),
       // На каких вопросах останавливаются: берём те прохождения, где
       // первое напоминание за период уже ушло.
       prisma.quizReminder.findMany({
@@ -843,6 +954,20 @@ export function registerAdminCommands(bot: Bot) {
       buildOnboardingFunnel(funnelEvents, days) +
         `\n\n${buildMenuBlock(funnelEvents, days)}` +
         `\n\n${buildQuizReminderBlock(funnelEvents, quizStops.map((r) => r.reminder1QuestionNumber), days)}` +
+        `\n\n${buildConsultBlock({
+          cardOpened: new Set(
+            funnelEvents.filter((e) => e.type === "consult_card_opened").map((e) => String(e.telegramId))
+          ).size,
+          started: new Set(
+            funnelEvents
+              .filter((e) => e.type === "consult_request_started")
+              .map((e) => String(e.telegramId))
+          ).size,
+          // Заявки за тот же период, что и события: иначе проценты
+          // считались бы от разных множеств.
+          requests: consultRows.filter((c) => c.createdAt >= since),
+          days,
+        })}` +
         `\n\nВсего пользователей: ${total}\n` +
         `Дали согласие на обработку данных: ${granted}\n` +
         `Отказались на согласии: ${declined}\n` +

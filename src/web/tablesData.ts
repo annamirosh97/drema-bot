@@ -459,7 +459,14 @@ export interface ConsultTableRow {
   id: number;
   telegramId: string;
   parent: string;
+  // Как с родителем связываться: @username, телефон или прямая
+  // пометка, что писать будет он сам.
+  contact: string;
   status: string;
+  lostReason: string | null;
+  source: string;
+  priceRub: number;
+  request: string | null;
   createdAt: Date;
   paidAt: Date | null;
   contactedAt: Date | null;
@@ -467,10 +474,15 @@ export interface ConsultTableRow {
   doneAt: Date | null;
   payoutRub: number | null;
   payoutPaidAt: Date | null;
+  // Сколько часов заявка ждёт следующего действия команды. null —
+  // ждать нечего: заявка уже оплачена, закрыта или потеряна.
+  waitingHours: number | null;
+  waitingOverdue: boolean;
 }
 
 export interface ConsultFilters {
   status: string;
+  source: string;
   notContacted: boolean;
   notPaidOut: boolean;
 }
@@ -479,9 +491,36 @@ export function parseConsultFilters(query: Record<string, unknown>): ConsultFilt
   const str = (k: string) => (typeof query[k] === "string" ? (query[k] as string).trim() : "");
   return {
     status: str("status"),
+    source: str("source"),
     notContacted: query.notContacted === "1",
     notPaidOut: query.notPaidOut === "1",
   };
+}
+
+// Сколько заявка ждёт и не пора ли вмешаться. Пороги из ТЗ: новая
+// заявка ждёт первого сообщения три часа, написанная — двое суток до
+// оплаты. Напоминаний по ним бот не шлёт, но в списке это видно.
+const NEW_OVERDUE_H = 3;
+const CONTACTED_OVERDUE_H = 48;
+
+function waiting(status: string, createdAt: Date, contactedAt: Date | null) {
+  const hours = (from: Date) => Math.floor((Date.now() - from.getTime()) / 3_600_000);
+  if (status === "NEW") {
+    const h = hours(createdAt);
+    return { waitingHours: h, waitingOverdue: h > NEW_OVERDUE_H };
+  }
+  if (status === "CONTACTED" && contactedAt) {
+    const h = hours(contactedAt);
+    return { waitingHours: h, waitingOverdue: h > CONTACTED_OVERDUE_H };
+  }
+  return { waitingHours: null, waitingOverdue: false };
+}
+
+// Сколько заявок дошло до денег и на какую сумму. Считается по тем же
+// фильтрам, что и список: иначе итог не совпадал бы с тем, что видно.
+export interface ConsultTotals {
+  paidCount: number;
+  paidRub: number;
 }
 
 export async function loadConsultsTable(query: TableQuery, filters: ConsultFilters) {
@@ -493,6 +532,7 @@ export async function loadConsultsTable(query: TableQuery, filters: ConsultFilte
       ...(users ? { telegramId: { in: users } } : {}),
       ...(range.gte || range.lte ? { createdAt: range } : {}),
       ...(filters.status ? { status: filters.status as never } : {}),
+      ...(filters.source ? { source: filters.source as never } : {}),
       ...(filters.notContacted ? { contactedAt: null } : {}),
       ...(filters.notPaidOut ? { payoutPaidAt: null } : {}),
     },
@@ -503,7 +543,14 @@ export async function loadConsultsTable(query: TableQuery, filters: ConsultFilte
     id: c.id,
     telegramId: String(c.telegramId),
     parent: parentName(c.session),
+    contact: c.parentUsername
+      ? `@${c.parentUsername}`
+      : c.parentPhone ?? (c.firstContact === "PARENT" ? "напишет сам" : "—"),
     status: c.status,
+    lostReason: c.lostReason,
+    source: c.source,
+    priceRub: c.priceRub,
+    request: c.requestText,
     createdAt: c.createdAt,
     paidAt: c.paidAt,
     contactedAt: c.contactedAt,
@@ -511,15 +558,26 @@ export async function loadConsultsTable(query: TableQuery, filters: ConsultFilte
     doneAt: c.doneAt,
     payoutRub: c.consultantPayoutRub,
     payoutPaidAt: c.payoutPaidAt,
+    ...waiting(c.status, c.createdAt, c.contactedAt),
   }));
 
   const sorted = sortRows(rows, query, {
     created: (r) => r.createdAt.getTime(),
     parent: (r) => r.parent,
     status: (r) => r.status,
+    price: (r) => r.priceRub,
+    waiting: (r) => r.waitingHours,
     contacted: (r) => r.contactedAt?.getTime() ?? null,
     done: (r) => r.doneAt?.getTime() ?? null,
   });
 
-  return { ...paginate(sorted, query.page), all: sorted };
+  // Деньгами считаем всё, что дошло до оплаты: дальше статус меняется,
+  // но заявка уже оплачена и из суммы выпадать не должна.
+  const paid = rows.filter((r) => ["PAID", "CHAT_CREATED", "DONE"].includes(r.status));
+  const totals: ConsultTotals = {
+    paidCount: paid.length,
+    paidRub: paid.reduce((sum, r) => sum + r.priceRub, 0),
+  };
+
+  return { ...paginate(sorted, query.page), all: sorted, totals };
 }

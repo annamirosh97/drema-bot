@@ -1335,7 +1335,9 @@ export function startAdminServer(api: Api) {
           pages: data.pages,
         },
         rows: data.rows,
+        totals: data.totals,
         filters,
+        fullPriceRub: env.CONSULT_PRICE_RUB,
       })
     );
   });
@@ -1344,7 +1346,7 @@ export function startAdminServer(api: Api) {
     const request = await prisma.consultRequest.findUnique({ where: { id: Number(req.params.id) } });
     if (!request) return res.status(404).send("Заявка не найдена.");
 
-    const [recommendation, ageAnswer] = await Promise.all([
+    const [recommendation, ageAnswer, transfer, upsell] = await Promise.all([
       prisma.recommendation.findUnique({
         where: {
           telegramId_attempt: { telegramId: request.telegramId, attempt: request.attempt },
@@ -1353,6 +1355,19 @@ export function startAdminServer(api: Api) {
       prisma.answer.findFirst({
         where: { telegramId: request.telegramId, attempt: request.attempt, questionNumber: 1 },
       }),
+      // Согласие на передачу данных Софии: без него пакет не уходит, и
+      // в карточке это должно быть видно, а не выясняться в логах.
+      prisma.consentRecord.findFirst({
+        where: {
+          type: "SPECIALIST_TRANSFER",
+          action: "GRANTED",
+          relatedConsultRequestId: request.id,
+        },
+      }),
+      // Срок скидки живёт у предложения, а не у заявки.
+      request.source === "AFTER_PDF"
+        ? prisma.upsellOffer.findUnique({ where: { telegramId: request.telegramId } })
+        : Promise.resolve(null),
     ]);
 
     res.send(
@@ -1366,6 +1381,15 @@ export function startAdminServer(api: Api) {
         contactConsentAt: request.contactConsentAt,
         firstContact: request.firstContact,
         contactedAt: request.contactedAt,
+        paidAt: request.paidAt,
+        chatCreatedAt: request.chatCreatedAt,
+        lostAt: request.lostAt,
+        lostReason: request.lostReason,
+        teamNotifiedAt: request.teamNotifiedAt,
+        requestText: request.requestText,
+        transferAt: transfer?.createdAt ?? null,
+        discountUntil: upsell?.expiresAt ?? null,
+        fullPriceRub: env.CONSULT_PRICE_RUB,
         doneAt: request.doneAt,
         diaryReceived: request.diaryReceived,
         payoutRub: request.consultantPayoutRub,
