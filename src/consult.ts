@@ -163,30 +163,146 @@ export async function startConsultRequest(
 
   await prisma.session.update({
     where: { telegramId: session.telegramId },
-    data: { stage: "CONSULT_REQUEST" },
+    data: { stage: "CONSULT_CONSENT" },
   });
-  await replyStatic(ctx, texts.consultRequestAsk, { reply_markup: consultRequestKeyboard() });
+  await replyStatic(ctx, consultContactText(), {
+    link_preview_options: { is_disabled: true },
+    reply_markup: consultConsentKeyboard(),
+  });
   return request;
 }
-
-// ── Шаг 1: что хотите обсудить ──────────────────────────────────────
 
 // Заявка, которая ждёт ответа родителя. null — ждать нечего.
 async function pendingRequest(telegramId: bigint): Promise<ConsultRequest | null> {
   return prisma.consultRequest.findFirst({
-    where: { telegramId, firstContact: "PENDING", status: { in: [...OPEN_STATUSES] } },
+    where: { telegramId, status: { in: [...OPEN_STATUSES] } },
     orderBy: { createdAt: "desc" },
   });
 }
 
-// Просьба о контакте. Зовётся и после текста запроса, и после
-// «Пропустить»: дальше путь один.
-async function askForContact(ctx: Context, telegramId: bigint) {
-  await prisma.session.update({ where: { telegramId }, data: { stage: "CONSULT_CONSENT" } });
-  return replyStatic(ctx, consultContactText(), {
-    link_preview_options: { is_disabled: true },
-    reply_markup: consultConsentKeyboard(),
+// Заявка, по которой ещё не выбран способ связи.
+async function awaitingContact(telegramId: bigint): Promise<ConsultRequest | null> {
+  const request = await pendingRequest(telegramId);
+  return request?.firstContact === "PENDING" ? request : null;
+}
+
+// ── Шаг 1: контакт для команды ──────────────────────────────────────
+
+// Спрашиваем, что обсудить. Клавиатуру контакта убирать отдельно не
+// нужно: она одноразовая и прячется сама, как только по ней нажали.
+async function askWhatToDiscuss(ctx: Context, telegramId: bigint) {
+  await prisma.session.update({
+    where: { telegramId },
+    data: { stage: "CONSULT_REQUEST" },
   });
+  return replyStatic(ctx, texts.consultRequestAsk, {
+    reply_markup: consultRequestKeyboard(),
+  });
+}
+
+// Карточка заявки команде собирается на третьем этапе; пока уходит
+// короткое уведомление — в конце пути, когда известно и как связаться,
+// и о чём человек хочет говорить.
+async function notifyTeam(api: Api, request: ConsultRequest) {
+  const who = request.parentUsername
+    ? `@${request.parentUsername}`
+    : request.parentPhone ?? "без username — напишет сам";
+  const what = request.requestText ? `\nЗапрос: «${request.requestText}»` : "";
+  await api
+    .sendMessage(adminChatId(), `🗓 Заявка на консультацию №${request.id}: ${who}${what}`)
+    .catch((error) => console.error("Не удалось сообщить о заявке:", error));
+}
+
+// Родитель прислал контакт. Возвращает false, если ждать его было
+// незачем — тогда вызывающий решает, что делать с сообщением.
+export async function takeConsultContact(
+  ctx: Context,
+  session: Session,
+  contact: { user_id?: number; phone_number: string }
+): Promise<boolean> {
+  const request = await awaitingContact(session.telegramId);
+  if (!request) return false;
+
+  // Переслать можно контакт любого человека из своей книги. Чужой
+  // команде не нужен и согласием не является.
+  if (contact.user_id == null || BigInt(contact.user_id) !== session.telegramId) {
+    await logEvent(session.telegramId, "consult_wrong_contact");
+    await replyStatic(ctx, texts.consultContactNotYours, { reply_markup: consultConsentKeyboard() });
+    return true;
+  }
+
+  const username = ctx.from?.username ?? request.parentUsername;
+
+  // Без username команда может не найти человека по одному телефону,
+  // поэтому первым пишет родитель — но контакт мы всё равно приняли.
+  await prisma.consultRequest.update({
+    where: { id: request.id },
+    data: {
+      parentPhone: contact.phone_number,
+      contactConsentAt: new Date(),
+      firstContact: username ? "TEAM" : "PARENT",
+      parentUsername: username,
+    },
+  });
+
+  const saved = await recordSpecialistTransfer(
+    ctx,
+    session.telegramId,
+    request.id,
+    "Поделиться контактом"
+  );
+  if (!saved) return true;
+
+  await logEvent(session.telegramId, "consult_contact_shared");
+  await askWhatToDiscuss(ctx, session.telegramId);
+  return true;
+}
+
+// Нажали «Напишу команде сам(а)». Возвращает false, если такой заявки
+// нет: значит, это просто совпавший с подписью кнопки текст.
+export async function takeConsultSelfWrite(ctx: Context, session: Session): Promise<boolean> {
+  const request = await awaitingContact(session.telegramId);
+  if (!request) return false;
+
+  await prisma.consultRequest.update({
+    where: { id: request.id },
+    data: { firstContact: "PARENT", parentUsername: ctx.from?.username ?? request.parentUsername },
+  });
+
+  const saved = await recordSpecialistTransfer(
+    ctx,
+    session.telegramId,
+    request.id,
+    CONSULT_SELF_WRITE_BUTTON
+  );
+  if (!saved) return true;
+
+  await logEvent(session.telegramId, "consult_self_contact");
+  await askWhatToDiscuss(ctx, session.telegramId);
+  return true;
+}
+
+// ── Шаг 2: что хотите обсудить ──────────────────────────────────────
+
+// Конец пути: подтверждение родителю и уведомление команде. Текст
+// подтверждения зависит от того, кто пишет первым.
+async function finishConsultRequest(ctx: Context, session: Session, request: ConsultRequest) {
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "FAKE_DOOR_OFFER" },
+  });
+
+  // remove_keyboard — на случай, если клавиатура контакта почему-то
+  // осталась внизу чата: одноразовой её прячет сам Telegram, но
+  // полагаться на это в последнем сообщении пути не стоит.
+  await replyStatic(
+    ctx,
+    request.firstContact === "TEAM"
+      ? texts.consultRequestAccepted(escapeHtml(env.TEAM_USERNAME))
+      : texts.consultRequestSelfWrite(escapeHtml(env.TEAM_USERNAME), request.id),
+    { reply_markup: { remove_keyboard: true } }
+  );
+  await notifyTeam(ctx.api, request);
 }
 
 // Родитель написал, что хочет обсудить. Возвращает false, если ждать
@@ -203,12 +319,12 @@ export async function takeConsultRequestText(
   // Тысяча символов — предел, за которым это уже не «пара
   // предложений». Режем, а не отказываем: человек написал по делу, и
   // терять написанное из-за длины неправильно.
-  await prisma.consultRequest.update({
+  const updated = await prisma.consultRequest.update({
     where: { id: request.id },
     data: { requestText: text.slice(0, 1000) },
   });
   await logEvent(session.telegramId, "consult_request_text");
-  await askForContact(ctx, session.telegramId);
+  await finishConsultRequest(ctx, session, updated);
   return true;
 }
 
@@ -220,112 +336,10 @@ export async function remindConsultRequestText(ctx: Context): Promise<void> {
 }
 
 export async function skipConsultRequest(ctx: Context, session: Session): Promise<void> {
+  const request = await pendingRequest(session.telegramId);
+  if (!request) return;
   await logEvent(session.telegramId, "consult_request_skipped");
-  await askForContact(ctx, session.telegramId);
-}
-
-// ── Шаг 2: контакт для команды ──────────────────────────────────────
-
-// Возвращает родителя из стадии ожидания контакта обратно к офферу:
-// кнопки продуктов остаются в чате и должны продолжать работать.
-async function leaveConsentStage(telegramId: bigint, stage: Session["stage"]) {
-  if (stage !== "CONSULT_CONSENT" && stage !== "CONSULT_REQUEST") return;
-  await prisma.session.update({ where: { telegramId }, data: { stage: "FAKE_DOOR_OFFER" } });
-}
-
-// Карточка заявки команде собирается на третьем этапе; пока уходит
-// короткое уведомление — но уже после шага 2, когда известен контакт,
-// а не при создании заявки.
-async function notifyTeam(api: Api, request: ConsultRequest) {
-  const who = request.parentUsername
-    ? `@${request.parentUsername}`
-    : request.parentPhone ?? "без username — напишет сам";
-  await api
-    .sendMessage(adminChatId(), `🗓 Заявка на консультацию №${request.id}: ${who}`)
-    .catch((error) => console.error("Не удалось сообщить о заявке:", error));
-}
-
-// Родитель прислал контакт. Возвращает false, если ждать его было
-// незачем — тогда вызывающий решает, что делать с сообщением.
-export async function takeConsultContact(
-  ctx: Context,
-  session: Session,
-  contact: { user_id?: number; phone_number: string }
-): Promise<boolean> {
-  const request = await pendingRequest(session.telegramId);
-  if (!request) return false;
-
-  // Переслать можно контакт любого человека из своей книги. Чужой
-  // команде не нужен и согласием не является.
-  if (contact.user_id == null || BigInt(contact.user_id) !== session.telegramId) {
-    await logEvent(session.telegramId, "consult_wrong_contact");
-    await replyStatic(ctx, texts.consultContactNotYours, { reply_markup: consultConsentKeyboard() });
-    return true;
-  }
-
-  const username = ctx.from?.username ?? request.parentUsername;
-
-  // Без username команда может не найти человека по одному телефону,
-  // поэтому первым пишет родитель — но контакт мы всё равно приняли.
-  const updated = await prisma.consultRequest.update({
-    where: { id: request.id },
-    data: {
-      parentPhone: contact.phone_number,
-      contactConsentAt: new Date(),
-      firstContact: username ? "TEAM" : "PARENT",
-      parentUsername: username,
-    },
-  });
-  await leaveConsentStage(session.telegramId, session.stage);
-
-  const saved = await recordSpecialistTransfer(
-    ctx,
-    session.telegramId,
-    request.id,
-    "Поделиться контактом"
-  );
-  if (!saved) return true;
-
-  await logEvent(session.telegramId, "consult_contact_shared");
-  // remove_keyboard — чтобы клавиатура не висела внизу чата после
-  // того, как выбор сделан.
-  await replyStatic(
-    ctx,
-    username
-      ? texts.consultRequestAccepted(escapeHtml(env.TEAM_USERNAME))
-      : texts.consultRequestSelfWrite(escapeHtml(env.TEAM_USERNAME), request.id),
-    { reply_markup: { remove_keyboard: true } }
-  );
-  await notifyTeam(ctx.api, updated);
-  return true;
-}
-
-// Нажали «Напишу команде сам(а)». Возвращает false, если такой заявки
-// нет: значит, это просто совпавший с подписью кнопки текст.
-export async function takeConsultSelfWrite(ctx: Context, session: Session): Promise<boolean> {
-  const request = await pendingRequest(session.telegramId);
-  if (!request) return false;
-
-  const updated = await prisma.consultRequest.update({
-    where: { id: request.id },
-    data: { firstContact: "PARENT", parentUsername: ctx.from?.username ?? request.parentUsername },
-  });
-  await leaveConsentStage(session.telegramId, session.stage);
-
-  const saved = await recordSpecialistTransfer(
-    ctx,
-    session.telegramId,
-    request.id,
-    CONSULT_SELF_WRITE_BUTTON
-  );
-  if (!saved) return true;
-
-  await logEvent(session.telegramId, "consult_self_contact");
-  await replyStatic(ctx, texts.consultRequestSelfWrite(escapeHtml(env.TEAM_USERNAME), request.id), {
-    reply_markup: { remove_keyboard: true },
-  });
-  await notifyTeam(ctx.api, updated);
-  return true;
+  await finishConsultRequest(ctx, session, request);
 }
 
 // Родитель в стадии согласия прислал что-то своё. ТЗ просит повторить
