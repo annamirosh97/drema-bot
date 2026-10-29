@@ -332,7 +332,7 @@ export function offerPdfCardKeyboard(price: string): InlineKeyboard {
 // оно живёт в тексте карточки, а кнопка остаётся про формат услуги.
 export function offerConsultCardKeyboard(price: string): InlineKeyboard {
   return new InlineKeyboard()
-    .text(`Записаться за ${price} ₽`, "offer_consult_signup")
+    .text("Оставить заявку", "offer_consult_request")
     .row()
     .text("← Назад", "offer_back");
 }
@@ -347,14 +347,14 @@ export function upsellOfferKeyboard(price: string): InlineKeyboard {
   return new InlineKeyboard()
     .text("💬 Подробнее о консультации", "upsell_details")
     .row()
-    .text(`Записаться за ${price} ₽`, "upsell_signup")
+    .text(`Оставить заявку за ${price} ₽`, "upsell_request")
     .row()
     .text("Пока не нужно", "upsell_decline");
 }
 
 export function upsellCardKeyboard(price: string): InlineKeyboard {
   return new InlineKeyboard()
-    .text(`Записаться за ${price} ₽`, "upsell_signup")
+    .text(`Оставить заявку за ${price} ₽`, "upsell_request")
     .row()
     .text("← Назад", "upsell_back");
 }
@@ -362,8 +362,10 @@ export function upsellCardKeyboard(price: string): InlineKeyboard {
 // Скидка кончилась — записаться можно, но уже по обычной цене. Кнопка
 // намеренно ведёт в тот же обработчик, что и основной оффер: это и есть
 // обычная запись, дублировать её незачем.
-export function upsellExpiredKeyboard(fullPrice: string): InlineKeyboard {
-  return new InlineKeyboard().text(`Записаться за ${fullPrice} ₽`, "offer_consult_signup");
+// Срок скидки вышел: заявку можно оставить по обычной цене, и цены
+// на кнопке нет — она уже названа в карточке.
+export function upsellExpiredKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("Оставить заявку", "offer_consult_request");
 }
 
 // Сообщение вслед за примером плана: только кнопка покупки.
@@ -375,7 +377,13 @@ export function exampleFollowupKeyboard(price: string): InlineKeyboard {
 // inline: иначе Telegram не даст кнопку, которая присылает контакт.
 // Нажатие на вторую кнопку приходит обычным текстовым сообщением с её
 // подписью — поэтому подпись вынесена в константу и сверяется с текстом.
-export const CONSULT_SELF_WRITE_BUTTON = "Я напишу специалисту сам(а)";
+// Первым родителю пишет команда, а не София, — отсюда и подпись.
+export const CONSULT_SELF_WRITE_BUTTON = "Напишу команде сам(а)";
+
+// Шаг «что хотите обсудить»: можно пропустить.
+export function consultRequestKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("Пропустить", "consult_request_skip");
+}
 
 export function consultConsentKeyboard(): Keyboard {
   return new Keyboard()

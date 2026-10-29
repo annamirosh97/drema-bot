@@ -1,14 +1,18 @@
 // Заявки на консультацию специалиста.
 //
-// Главное правило этого файла: контакт родителя не уходит специалисту,
-// пока родитель сам этого не разрешил. Поэтому заявка создаётся в
-// состоянии firstContact = PENDING, и пакет с анкетой и разбором
-// отправляется только после того, как родитель нажал «Поделиться
-// контактом» или «Я напишу специалисту сам(а)».
+// Бот собирает заявку, а не записывает с оплатой: дальше родителю
+// пишет команда Дрёмиуса, отвечает на вопросы, присылает ссылку на
+// оплату и уже после знакомит с Софией в общем чате.
 //
-// Создание заявки и отправка пакета намеренно разведены по отдельным
-// функциям: позже между ними встанет оплата, и тогда пакет будет
-// уходить по событию «заявка оплачена», а не из обработчика кнопки.
+// Два правила этого файла.
+//
+// Первое: контакт родителя не уходит никому, пока родитель сам этого
+// не разрешил. Заявка создаётся в состоянии firstContact = PENDING, и
+// запись SPECIALIST_TRANSFER появляется только после его выбора.
+//
+// Второе: пакет с анкетой и разбором уходит Софии только после статуса
+// PAID. До оплаты Софии не нужно ничего, а родитель ещё может
+// передумать — передавать его данные раньше незачем.
 
 import { Api, Context, InlineKeyboard, InputFile } from "grammy";
 import type { ConsultRequest, ConsultSource, Session } from "@prisma/client";
@@ -18,13 +22,18 @@ import { formatPrice, texts } from "./texts";
 import { ConsentInput, recordConsent } from "./consents";
 import { buildPrepText } from "./prep";
 import { currentAttempt } from "./attempt";
-import { CONSULT_SELF_WRITE_BUTTON, consultConsentKeyboard } from "./keyboards";
+import {
+  CONSULT_SELF_WRITE_BUTTON,
+  consultConsentKeyboard,
+  consultRequestKeyboard,
+} from "./keyboards";
 import { escapeHtml, replyStatic } from "./send";
 import { logEvent } from "./events";
 
 // Заявки в этих статусах считаются живыми: пока такая есть, вторую не
-// создаём. DONE и CANCELED не мешают записаться заново.
-const OPEN_STATUSES = ["NEW", "CONTACTED"] as const;
+// создаём. Оплаченная тоже живая — человек уже в работе, а DONE и LOST
+// записаться заново не мешают.
+const OPEN_STATUSES = ["NEW", "CONTACTED", "PAID"] as const;
 
 // Пишет согласие и, если не вышло, честно говорит об этом человеку.
 // Возвращает false — значит, действие выполнять нельзя: согласие,
@@ -55,7 +64,7 @@ async function recordSpecialistTransfer(
     action: "GRANTED",
     source: "CONSULT_SIGNUP",
     documents: ["PD_CONSENT"],
-    messageText: consultConsentText(),
+    messageText: consultContactText(),
     buttonText,
     telegramMessageId: ctx.callbackQuery?.message?.message_id,
     relatedConsultRequestId: requestId,
@@ -64,8 +73,8 @@ async function recordSpecialistTransfer(
 
 // В сообщении о контакте стоит ссылка на согласие — адрес приходит из
 // переменных окружения и в HTML должен быть обезврежен.
-export function consultConsentText(): string {
-  return texts.consultConsent(escapeHtml(env.PD_CONSENT_URL));
+export function consultContactText(): string {
+  return texts.consultContactAsk(escapeHtml(env.PD_CONSENT_URL));
 }
 
 function adminChatId(): number {
@@ -99,8 +108,8 @@ export interface ConsultOrigin {
   cardText?: string;
 }
 
-// Создаёт заявку и коротко сообщает админу. Пакет не отправляет: ждём
-// выбора родителя (или, в будущем, оплаты).
+// Создаёт заявку. Ни команде, ни Софии ничего не уходит: команде
+// нужен контакт, а Софии — оплата.
 export async function createConsultRequest(
   api: Api,
   telegramId: bigint,
@@ -120,13 +129,9 @@ export async function createConsultRequest(
     },
   });
 
-  await api
-    .sendMessage(
-      adminChatId(),
-      `🗓 Заявка на консультацию #${request.id} создана, ждём выбора родителя.`
-    )
-    .catch((error) => console.error("Не удалось сообщить админу о заявке:", error));
-
+  // Команде ничего не сообщаем: заявка без контакта ей бесполезна, а
+  // родитель может уйти на первом же шаге. Уведомление уходит после
+  // шага 2, когда известно, как с человеком связаться.
   return request;
 }
 
@@ -143,65 +148,30 @@ export async function startConsultRequest(
   session: Session,
   origin: ConsultOrigin = {}
 ): Promise<ConsultRequest | null> {
-  const username = ctx.from?.username;
-
   const existing = await prisma.consultRequest.findFirst({
     where: { telegramId: session.telegramId, status: { in: [...OPEN_STATUSES] } },
     orderBy: { createdAt: "desc" },
   });
   if (existing) {
     await logEvent(session.telegramId, "consult_signup_duplicate");
-    await replyStatic(ctx, texts.consultAlreadyExists(escapeHtml(env.SPECIALIST_USERNAME)));
+    await replyStatic(ctx, texts.consultRequestExists(escapeHtml(env.TEAM_USERNAME)));
     return null;
   }
 
-  const request = await createConsultRequest(ctx.api, session.telegramId, username, origin);
-
-  // Условия оферты написаны в карточке, над кнопкой с ценой: нажатие и
-  // есть их принятие. Источник и текст карточки зависят от того, откуда
-  // человек записался — из основного оффера или из предложения со
-  // скидкой после покупки плана.
-  await saveConsent(ctx, {
-    telegramId: session.telegramId,
-    type: "OFFER_ACCEPTANCE",
-    action: "GRANTED",
-    source: origin.source === "AFTER_PDF" ? "UPSELL" : "CONSULT_SIGNUP",
-    documents: ["OFFER"],
-    messageText: origin.cardText ?? "",
-    buttonText: `Записаться за ${formatPrice(request.priceRub)} ₽`,
-    telegramMessageId: ctx.callbackQuery?.message?.message_id,
-    relatedConsultRequestId: request.id,
-  });
-
-  if (!username) {
-    // Без username специалист родителя не найдёт, передавать нечего:
-    // первым пишет родитель, и пакет можно отправлять сразу.
-    await prisma.consultRequest.update({
-      where: { id: request.id },
-      data: { firstContact: "PARENT" },
-    });
-    const transferred = await recordSpecialistTransfer(
-      ctx,
-      session.telegramId,
-      request.id,
-      "без username — пакет уходит специалисту, первым пишет родитель"
-    );
-    await replyStatic(ctx, texts.consultAcceptedNoUsername(escapeHtml(env.SPECIALIST_USERNAME), request.id));
-    if (transferred) await sendConsultPackage(ctx.api, request.id);
-    return request;
-  }
+  const request = await createConsultRequest(ctx.api, session.telegramId, ctx.from?.username, origin);
+  await logEvent(session.telegramId, "consult_request_started");
 
   await prisma.session.update({
     where: { telegramId: session.telegramId },
-    data: { stage: "CONSULT_CONSENT" },
+    data: { stage: "CONSULT_REQUEST" },
   });
-  await replyStatic(ctx, consultConsentText(), { reply_markup: consultConsentKeyboard() });
+  await replyStatic(ctx, texts.consultRequestAsk, { reply_markup: consultRequestKeyboard() });
   return request;
 }
 
-// ── Выбор родителя: передать контакт или написать самому ────────────
+// ── Шаг 1: что хотите обсудить ──────────────────────────────────────
 
-// Заявка, которая ждёт выбора родителя. null — ждать нечего.
+// Заявка, которая ждёт ответа родителя. null — ждать нечего.
 async function pendingRequest(telegramId: bigint): Promise<ConsultRequest | null> {
   return prisma.consultRequest.findFirst({
     where: { telegramId, firstContact: "PENDING", status: { in: [...OPEN_STATUSES] } },
@@ -209,11 +179,70 @@ async function pendingRequest(telegramId: bigint): Promise<ConsultRequest | null
   });
 }
 
-// Возвращает родителя из стадии ожидания согласия обратно к офферу:
+// Просьба о контакте. Зовётся и после текста запроса, и после
+// «Пропустить»: дальше путь один.
+async function askForContact(ctx: Context, telegramId: bigint) {
+  await prisma.session.update({ where: { telegramId }, data: { stage: "CONSULT_CONSENT" } });
+  return replyStatic(ctx, consultContactText(), {
+    link_preview_options: { is_disabled: true },
+    reply_markup: consultConsentKeyboard(),
+  });
+}
+
+// Родитель написал, что хочет обсудить. Возвращает false, если ждать
+// текста было незачем: тогда сообщение разбирается как обычно.
+export async function takeConsultRequestText(
+  ctx: Context,
+  session: Session,
+  text: string
+): Promise<boolean> {
+  if (session.stage !== "CONSULT_REQUEST") return false;
+  const request = await pendingRequest(session.telegramId);
+  if (!request) return false;
+
+  // Тысяча символов — предел, за которым это уже не «пара
+  // предложений». Режем, а не отказываем: человек написал по делу, и
+  // терять написанное из-за длины неправильно.
+  await prisma.consultRequest.update({
+    where: { id: request.id },
+    data: { requestText: text.slice(0, 1000) },
+  });
+  await logEvent(session.telegramId, "consult_request_text");
+  await askForContact(ctx, session.telegramId);
+  return true;
+}
+
+// Прислали не текст: голосовое, фото, стикер. Повторяем просьбу.
+export async function remindConsultRequestText(ctx: Context): Promise<void> {
+  await replyStatic(ctx, texts.consultRequestNotText, {
+    reply_markup: consultRequestKeyboard(),
+  });
+}
+
+export async function skipConsultRequest(ctx: Context, session: Session): Promise<void> {
+  await logEvent(session.telegramId, "consult_request_skipped");
+  await askForContact(ctx, session.telegramId);
+}
+
+// ── Шаг 2: контакт для команды ──────────────────────────────────────
+
+// Возвращает родителя из стадии ожидания контакта обратно к офферу:
 // кнопки продуктов остаются в чате и должны продолжать работать.
 async function leaveConsentStage(telegramId: bigint, stage: Session["stage"]) {
-  if (stage !== "CONSULT_CONSENT") return;
+  if (stage !== "CONSULT_CONSENT" && stage !== "CONSULT_REQUEST") return;
   await prisma.session.update({ where: { telegramId }, data: { stage: "FAKE_DOOR_OFFER" } });
+}
+
+// Карточка заявки команде собирается на третьем этапе; пока уходит
+// короткое уведомление — но уже после шага 2, когда известен контакт,
+// а не при создании заявки.
+async function notifyTeam(api: Api, request: ConsultRequest) {
+  const who = request.parentUsername
+    ? `@${request.parentUsername}`
+    : request.parentPhone ?? "без username — напишет сам";
+  await api
+    .sendMessage(adminChatId(), `🗓 Заявка на консультацию №${request.id}: ${who}`)
+    .catch((error) => console.error("Не удалось сообщить о заявке:", error));
 }
 
 // Родитель прислал контакт. Возвращает false, если ждать его было
@@ -226,67 +255,76 @@ export async function takeConsultContact(
   const request = await pendingRequest(session.telegramId);
   if (!request) return false;
 
-  // Переслать можно контакт любого человека из своей книги. Чужой номер
-  // специалисту не нужен и согласием не является.
+  // Переслать можно контакт любого человека из своей книги. Чужой
+  // команде не нужен и согласием не является.
   if (contact.user_id == null || BigInt(contact.user_id) !== session.telegramId) {
     await logEvent(session.telegramId, "consult_wrong_contact");
     await replyStatic(ctx, texts.consultContactNotYours, { reply_markup: consultConsentKeyboard() });
     return true;
   }
 
-  await prisma.consultRequest.update({
+  const username = ctx.from?.username ?? request.parentUsername;
+
+  // Без username команда может не найти человека по одному телефону,
+  // поэтому первым пишет родитель — но контакт мы всё равно приняли.
+  const updated = await prisma.consultRequest.update({
     where: { id: request.id },
     data: {
       parentPhone: contact.phone_number,
       contactConsentAt: new Date(),
-      firstContact: "SPECIALIST",
-      // username мог появиться уже после создания заявки.
-      parentUsername: ctx.from?.username ?? request.parentUsername,
+      firstContact: username ? "TEAM" : "PARENT",
+      parentUsername: username,
     },
   });
   await leaveConsentStage(session.telegramId, session.stage);
 
-  // remove_keyboard — чтобы клавиатура согласия не висела внизу чата
-  // после того, как выбор сделан.
-  const transferred = await recordSpecialistTransfer(
+  const saved = await recordSpecialistTransfer(
     ctx,
     session.telegramId,
     request.id,
     "Поделиться контактом"
   );
+  if (!saved) return true;
 
   await logEvent(session.telegramId, "consult_contact_shared");
-  await replyStatic(ctx, texts.consultAccepted(escapeHtml(env.SPECIALIST_USERNAME)), {
-    reply_markup: { remove_keyboard: true },
-  });
-  if (transferred) await sendConsultPackage(ctx.api, request.id);
+  // remove_keyboard — чтобы клавиатура не висела внизу чата после
+  // того, как выбор сделан.
+  await replyStatic(
+    ctx,
+    username
+      ? texts.consultRequestAccepted(escapeHtml(env.TEAM_USERNAME))
+      : texts.consultRequestSelfWrite(escapeHtml(env.TEAM_USERNAME), request.id),
+    { reply_markup: { remove_keyboard: true } }
+  );
+  await notifyTeam(ctx.api, updated);
   return true;
 }
 
-// Нажали «Я напишу специалисту сам(а)». Возвращает false, если такой
-// заявки нет: значит, это просто совпавший с подписью кнопки текст.
+// Нажали «Напишу команде сам(а)». Возвращает false, если такой заявки
+// нет: значит, это просто совпавший с подписью кнопки текст.
 export async function takeConsultSelfWrite(ctx: Context, session: Session): Promise<boolean> {
   const request = await pendingRequest(session.telegramId);
   if (!request) return false;
 
-  await prisma.consultRequest.update({
+  const updated = await prisma.consultRequest.update({
     where: { id: request.id },
     data: { firstContact: "PARENT", parentUsername: ctx.from?.username ?? request.parentUsername },
   });
   await leaveConsentStage(session.telegramId, session.stage);
 
-  const transferred = await recordSpecialistTransfer(
+  const saved = await recordSpecialistTransfer(
     ctx,
     session.telegramId,
     request.id,
     CONSULT_SELF_WRITE_BUTTON
   );
+  if (!saved) return true;
 
   await logEvent(session.telegramId, "consult_self_contact");
-  await replyStatic(ctx, texts.consultSelfWrite(escapeHtml(env.SPECIALIST_USERNAME), request.id), {
+  await replyStatic(ctx, texts.consultRequestSelfWrite(escapeHtml(env.TEAM_USERNAME), request.id), {
     reply_markup: { remove_keyboard: true },
   });
-  if (transferred) await sendConsultPackage(ctx.api, request.id);
+  await notifyTeam(ctx.api, updated);
   return true;
 }
 
@@ -304,7 +342,10 @@ export async function remindAboutConsentOnce(ctx: Context, session: Session) {
   if (nudged.has(key)) return replyStatic(ctx, texts.genericFallback);
 
   nudged.add(key);
-  return replyStatic(ctx, consultConsentText(), { reply_markup: consultConsentKeyboard() });
+  return replyStatic(ctx, consultContactText(), {
+    link_preview_options: { is_disabled: true },
+    reply_markup: consultConsentKeyboard(),
+  });
 }
 
 // ── Пакет заявки для админа и специалиста ───────────────────────────

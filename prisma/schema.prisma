@@ -33,7 +33,8 @@ enum Stage {
   EDIT_MORE // ждём ответ «менять ли что-то ещё»
   AWAITING_RECOMMENDATION // анкета подтверждена, ждём, пока admin пришлёт разбор
   FAKE_DOOR_OFFER // показан экран оплаты, ждём "Оплатить" / "Не сейчас"
-  CONSULT_CONSENT // записался на консультацию, ждём, поделится ли контактом
+  CONSULT_REQUEST // оставил заявку, ждём, что хочет обсудить
+  CONSULT_CONSENT // заявка оставлена, ждём контакт для команды
   CSAT_RATING // ждём оценку 1-5
   CSAT_FEEDBACK // ждём открытый отзыв
   CSAT_DONE // всё завершено
@@ -537,6 +538,10 @@ enum OfferEventType {
   offer_consult_details
   offer_back
   consult_signup
+  consult_card_opened
+  consult_request_started
+  consult_request_text
+  consult_request_skipped
   offer_declined
   upsell_shown
   upsell_details
@@ -741,8 +746,11 @@ enum ConsultStatus {
 // заявка специалисту не уходит: передавать контакт без разрешения нельзя.
 enum FirstContact {
   PENDING
-  SPECIALIST
+  // Первым пишет команда Дрёмиуса: родитель поделился контактом.
+  TEAM
   PARENT
+  // Не используется с 29.10.2026: первым писал специалист.
+  SPECIALIST
 }
 
 // Откуда пришла заявка: из основного оффера после бесплатного разбора

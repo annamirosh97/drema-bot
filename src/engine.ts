@@ -25,7 +25,10 @@ import {
 } from "./feedback";
 import {
   remindAboutConsentOnce,
+  remindConsultRequestText,
+  skipConsultRequest,
   startConsultRequest,
+  takeConsultRequestText,
   takeConsultContact,
   takeConsultSelfWrite,
 } from "./consult";
@@ -70,6 +73,7 @@ import {
   editMoreKeyboard,
   exampleFollowupKeyboard,
   multiChoiceKeyboard,
+  consultRequestKeyboard,
   offerChoiceKeyboard,
   offerConsultCardKeyboard,
   offerPdfCardKeyboard,
@@ -315,6 +319,8 @@ export async function handleIncoming(ctx: Context) {
       return handleAwaitingRecommendation(ctx, session, messageText);
     case "FAKE_DOOR_OFFER":
       return handleOffer(ctx, session, callbackData);
+    case "CONSULT_REQUEST":
+      return handleConsultRequestStage(ctx, session, callbackData, messageText);
     case "CONSULT_CONSENT":
       return remindAboutConsentOnce(ctx, session);
     case "CSAT_RATING":
@@ -409,6 +415,10 @@ export async function resendCurrentStep(ctx: Context, session: Session) {
       return replyStatic(ctx, texts.csatPrompt, { reply_markup: csatKeyboard() });
     case "CSAT_FEEDBACK":
       return replyStatic(ctx, texts.csatFeedbackPrompt);
+    case "CONSULT_REQUEST":
+      return replyStatic(ctx, texts.consultRequestAsk, {
+        reply_markup: consultRequestKeyboard(),
+      });
     case "CONSULT_CONSENT":
       // То же, что и на обычный текст в этой стадии: напоминаем про
       // контакт один раз.
@@ -2055,6 +2065,31 @@ async function handleAwaitingRecommendation(ctx: Context, session: Session, mess
   return replyStatic(ctx, texts.addendumAck);
 }
 
+// Шаг «что хотите обсудить». Текст сохраняется как запрос, «Пропустить»
+// ведёт дальше без него. Всё остальное — голосовое, фото, стикер —
+// просьба повторяется: сохранять такое нечем, а молчать нельзя.
+//
+// Команды и кнопки меню сюда не доходят: они разбираются выше, до
+// стадий, и в запрос не попадают.
+async function handleConsultRequestStage(
+  ctx: Context,
+  session: Session,
+  callbackData?: string,
+  messageText?: string
+) {
+  if (callbackData === "consult_request_skip") return skipConsultRequest(ctx, session);
+  if (callbackData) return;
+
+  if (messageText) {
+    if (await takeConsultRequestText(ctx, session, messageText)) return;
+    // Заявки, которая ждёт ответа, нет: шаг потерял смысл, возвращаем
+    // человека к офферу, чтобы он не застрял на пустом экране.
+    return sendOfferMessages(ctx.api, session.chatId);
+  }
+
+  return remindConsultRequestText(ctx);
+}
+
 // ── Оффер платного PDF ──────────────────────────────────────────────
 
 const EXAMPLE_PDF = "assets/example/Dremius_plan_sna_primer.pdf";
@@ -2105,14 +2140,28 @@ export async function sendOfferTo(api: Api, telegramId: bigint, chatId: bigint) 
 //
 // Если править не дали (сообщение слишком старое, его удалили), карточка
 // уходит новым сообщением — хуже выглядит, но работает.
-async function replaceWithCard(ctx: Context, text: string, markup: InlineKeyboard) {
+// photo — адрес картинки, которую нужно показать над текстом. Telegram
+// не умеет добавлять фото к существующему сообщению, но умеет показать
+// превью ссылки крупно и над текстом — этим и пользуемся. Ссылки в
+// самом тексте при этом нет, и человек видит только картинку.
+async function replaceWithCard(
+  ctx: Context,
+  text: string,
+  markup: InlineKeyboard,
+  photo?: string
+) {
+  const preview = photo
+    ? { url: photo, prefer_large_media: true, show_above_text: true }
+    : { is_disabled: true };
+  const options = { reply_markup: markup, parse_mode: "HTML" as const, link_preview_options: preview };
+
   try {
-    await ctx.editMessageText(text, { reply_markup: markup, parse_mode: "HTML" });
+    await ctx.editMessageText(text, options);
   } catch (error) {
     // Повторный тап по той же кнопке: сообщение уже такое, какое нужно.
     // Отправлять копию было бы хуже, чем не делать ничего.
     if (String(error).includes("message is not modified")) return;
-    await replyStatic(ctx, text, { reply_markup: markup });
+    await replyStatic(ctx, text, options);
   }
 }
 
@@ -2128,10 +2177,12 @@ async function handleOffer(ctx: Context, session: Session, callbackData?: string
 
   if (callbackData === "offer_consult_details") {
     await logOfferEvent(session.telegramId, "offer_consult_details");
+    await logOfferEvent(session.telegramId, "consult_card_opened");
     return replaceWithCard(
       ctx,
-      texts.offerConsultCard(consultPrice(), escapeHtml(env.OFFER_URL)),
-      offerConsultCardKeyboard(consultPrice())
+      texts.offerConsultCard(consultPrice()),
+      offerConsultCardKeyboard(consultPrice()),
+      env.SOFIA_CARD_URL
     );
   }
 
@@ -2156,10 +2207,13 @@ async function handleOffer(ctx: Context, session: Session, callbackData?: string
     return handleBuy(ctx, session);
   }
 
-  if (callbackData === "offer_consult_signup") {
+  // offer_consult_signup — кнопка «Записаться» из сообщений, которые
+  // ушли до 29.10.2026. Ведёт туда же, куда новая «Оставить заявку»:
+  // ломать её незачем, а путь теперь один.
+  if (callbackData === "offer_consult_request" || callbackData === "offer_consult_signup") {
     await logOfferEvent(session.telegramId, "consult_signup");
     return startConsultRequest(ctx, session, {
-      cardText: texts.offerConsultCard(consultPrice(), env.OFFER_URL),
+      cardText: texts.offerConsultCard(consultPrice()),
     });
   }
 
@@ -2274,6 +2328,10 @@ type OfferEventName =
   | "example_clicked"
   | "buy_clicked"
   | "consult_signup"
+  | "consult_card_opened"
+  | "consult_request_started"
+  | "consult_request_text"
+  | "consult_request_skipped"
   | "offer_declined"
   | "onb_welcome"
   | "onb_welcome_value"

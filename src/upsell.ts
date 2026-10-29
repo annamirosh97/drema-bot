@@ -175,7 +175,7 @@ async function sendUpsell(api: Api, orderId: number, telegramId: bigint) {
   const message = await sendStatic(
     api,
     session.chatId,
-    texts.upsellOffer(price(), fullPrice(offer), formatOfferDate(offer.expiresAt), offerUrl()),
+    texts.upsellOffer(price(), fullPrice(offer), formatOfferDate(offer.expiresAt)),
     { reply_markup: upsellOfferKeyboard(price()) }
   );
 
@@ -203,12 +203,22 @@ async function logUpsellEvent(telegramId: bigint, type: UpsellEvent) {
 
 // Та же логика, что у карточек основного оффера: правим то же
 // сообщение, а если не дали — отправляем новым.
-async function replaceWithCard(ctx: Context, text: string, markup: InlineKeyboard) {
+async function replaceWithCard(
+  ctx: Context,
+  text: string,
+  markup: InlineKeyboard,
+  photo?: string
+) {
+  const preview = photo
+    ? { url: photo, prefer_large_media: true, show_above_text: true }
+    : { is_disabled: true };
+  const options = { reply_markup: markup, parse_mode: "HTML" as const, link_preview_options: preview };
+
   try {
-    await ctx.editMessageText(text, { reply_markup: markup, parse_mode: "HTML" });
+    await ctx.editMessageText(text, options);
   } catch (error) {
     if (String(error).includes("message is not modified")) return;
-    await replyStatic(ctx, text, { reply_markup: markup });
+    await replyStatic(ctx, text, options);
   }
 }
 
@@ -222,10 +232,12 @@ export async function handleUpsell(ctx: Context, session: Session, callbackData:
 
   if (callbackData === "upsell_details") {
     await logUpsellEvent(session.telegramId, "upsell_details");
+    await logEvent(session.telegramId, "consult_card_opened");
     return replaceWithCard(
       ctx,
-      texts.upsellConsultCard(price(), fullPrice(offer), date, offerUrl()),
-      upsellCardKeyboard(price())
+      texts.upsellConsultCard(price(), fullPrice(offer), date),
+      upsellCardKeyboard(price()),
+      env.SOFIA_CARD_URL
     );
   }
 
@@ -233,12 +245,16 @@ export async function handleUpsell(ctx: Context, session: Session, callbackData:
     await logUpsellEvent(session.telegramId, "upsell_back");
     return replaceWithCard(
       ctx,
-      texts.upsellOffer(price(), fullPrice(offer), date, offerUrl()),
+      texts.upsellOffer(price(), fullPrice(offer), date),
       upsellOfferKeyboard(price())
     );
   }
 
-  if (callbackData === "upsell_signup") return handleUpsellSignup(ctx, session, offer);
+  // upsell_signup — кнопка «Записаться» из сообщений, ушедших до
+  // 29.10.2026: ведёт туда же, куда новая «Оставить заявку».
+  if (callbackData === "upsell_request" || callbackData === "upsell_signup") {
+    return handleUpsellSignup(ctx, session, offer);
+  }
   if (callbackData === "upsell_decline") return handleUpsellDecline(ctx, session, offer, date);
 }
 
@@ -246,25 +262,20 @@ async function handleUpsellSignup(ctx: Context, session: Session, offer: UpsellO
   if (Date.now() > offer.expiresAt.getTime()) {
     await logUpsellEvent(session.telegramId, "upsell_expired_click");
     return replyStatic(ctx, texts.upsellExpired, {
-      reply_markup: upsellExpiredKeyboard(fullPrice(offer)),
+      reply_markup: upsellExpiredKeyboard(),
     });
   }
 
   await logUpsellEvent(session.telegramId, "upsell_signup");
 
   // Дальше — ровно тот же путь, что и в основном оффере: согласие на
-  // передачу контакта, подтверждение родителю, пакет заявки. Разница
+  // шаг «что обсудить», контакт для команды, подтверждение. Разница
   // только в цене, источнике и привязке к заказу.
   const request = await startConsultRequest(ctx, session, {
     priceRub: offer.priceRub,
     source: "AFTER_PDF",
     orderId: offer.orderId,
-    cardText: texts.upsellConsultCard(
-      price(),
-      fullPrice(offer),
-      formatOfferDate(offer.expiresAt),
-      env.OFFER_URL
-    ),
+    cardText: texts.upsellConsultCard(price(), fullPrice(offer), formatOfferDate(offer.expiresAt)),
   });
   if (!request) return;
 
