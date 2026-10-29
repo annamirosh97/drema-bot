@@ -42,13 +42,20 @@ export function welcomeKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text("Получить разбор", "start")
     .row()
+    .text("Пример разбора", "example_welcome")
+    .row()
     .text("Как я работаю", "how_it_works");
 }
 
 // «Мой подход» — единственная новая кнопка онбординга: прежний
 // how_it_works занят экраном трёх шагов.
 export function stepsKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("Начать", "start").row().text("Мой подход", "my_approach");
+  return new InlineKeyboard()
+    .text("Начать", "start")
+    .row()
+    .text("Пример разбора", "example_steps")
+    .row()
+    .text("Мой подход", "my_approach");
 }
 
 // Не в основном пути с 27.10.2026, см. texts.welcomeValue.
@@ -73,6 +80,8 @@ export function menuKeyboard(withBack = false): InlineKeyboard {
 
   return keyboard
     .text("Начать бот заново", "menu_restart")
+    .row()
+    .text("Пример готового разбора", "menu_example")
     .row()
     .text("Поддержка", "menu_support")
     .row()
@@ -197,7 +206,28 @@ export function pdRevokeConfirmKeyboard(): InlineKeyboard {
 // собирался в трёх местах — при переходе, при повторе и при вводе
 // текста вместо нажатия, — и кнопка расходилась между ними.
 export function howItWorksKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("Начать", "start");
+  return new InlineKeyboard()
+    .text("Начать", "start")
+    .row()
+    .text("Пример разбора", "example_how_it_works");
+}
+
+// Под финальным сообщением примера и под примером плана. Источник в
+// callback_data: по нему видно, откуда человек пошёл дальше.
+export function exampleFinalKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("Получить свой разбор", "example_cta_final")
+    .row()
+    .text("Пример персонального плана", "example_plan_final")
+    .row()
+    .text("Как я работаю", "example_hiw_final");
+}
+
+export function examplePlanKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("Получить свой разбор", "example_cta_plan")
+    .row()
+    .text("Как я работаю", "example_hiw_plan");
 }
 
 export const HEALTH_OK = "Ничего из этого";

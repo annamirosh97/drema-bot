@@ -95,6 +95,7 @@ const FUNNEL_LABELS: Record<string, string> = {
 interface FunnelEvent {
   telegramId: bigint;
   type: string;
+  source?: string | null;
 }
 
 // Шаги считаем по уникальным людям: один человек, нажавший /start
@@ -138,6 +139,62 @@ export function buildOnboardingFunnel(events: FunnelEvent[], days: number): stri
     `  — «Как я работаю» открыли: ${howItWorks} (${pct(howItWorks, first)} от начала)\n` +
     `  — азбуку получили: ${guide}`
   );
+}
+
+// ── Пример разбора ──────────────────────────────────────────────────
+//
+// Главный вопрос здесь не «сколько открыли», а «помогает ли пример
+// дойти до анкеты». Поэтому рядом стоят две доходимости: у тех, кто
+// пример видел, и у тех, кто нет. Без второй цифры первая ничего не
+// значит — до анкеты доходят и без примера.
+export function buildExampleBlock(events: FunnelEvent[], days: number): string {
+  const idsBy = (type: string) =>
+    new Set(events.filter((e) => e.type === type).map((e) => String(e.telegramId)));
+
+  const opened = idsBy("example_analysis_opened");
+  const started = idsBy("quiz_question_shown");
+  const completed = idsBy("quiz_completed");
+  const everyone = new Set(events.map((e) => String(e.telegramId)));
+
+  const pct = (part: number, whole: number) =>
+    whole ? `${Math.round((part / whole) * 100)}%` : "—";
+  const share = (group: Set<string>, target: Set<string>) =>
+    [...group].filter((id) => target.has(id)).length;
+
+  const withoutExample = new Set([...everyone].filter((id) => !opened.has(id)));
+
+  // Откуда открывали. Источник пишется в самом событии: пример
+  // доступен с четырёх экранов, и без разбивки непонятно, какой из них
+  // работает.
+  const bySource = new Map<string, number>();
+  for (const e of events) {
+    if (e.type !== "example_analysis_opened") continue;
+    const key = e.source ?? "неизвестно";
+    bySource.set(key, (bySource.get(key) ?? 0) + 1);
+  }
+  const sourceNames: Record<string, string> = {
+    welcome: "с приветствия",
+    steps: "с трёх шагов",
+    how_it_works: "с «Как я работаю»",
+    menu: "из меню",
+  };
+
+  const lines = [
+    `Пример разбора за ${days} дн.:`,
+    `  открыли: ${opened.size}`,
+  ];
+  for (const [source, count] of [...bySource].sort((a, b) => b[1] - a[1])) {
+    lines.push(`    ${sourceNames[source] ?? source}: ${count}`);
+  }
+  lines.push(
+    `  открыли пример → дошли до анкеты: ${share(opened, started)} (${pct(share(opened, started), opened.size)})`,
+    `  открыли пример → завершили анкету: ${share(opened, completed)} (${pct(share(opened, completed), opened.size)})`,
+    `  без примера → дошли до анкеты: ${share(withoutExample, started)} (${pct(share(withoutExample, started), withoutExample.size)})`,
+    `  без примера → завершили анкету: ${share(withoutExample, completed)} (${pct(share(withoutExample, completed), withoutExample.size)})`,
+    `  открыли пример плана: ${idsBy("example_plan_opened").size}`
+  );
+
+  return lines.join("\n");
 }
 
 // ── Меню в /stats ───────────────────────────────────────────────────
@@ -790,7 +847,7 @@ export function registerAdminCommands(bot: Bot) {
       }),
       prisma.offerEvent.findMany({
         where: { createdAt: { gte: since } },
-        select: { telegramId: true, type: true },
+        select: { telegramId: true, type: true, source: true },
       }),
       // Обратная связь за тот же период, что и воронка: один /stats —
       // один период, иначе цифры в нём начали бы жить по разным часам.
@@ -952,6 +1009,7 @@ export function registerAdminCommands(bot: Bot) {
 
     await ctx.reply(
       buildOnboardingFunnel(funnelEvents, days) +
+        `\n\n${buildExampleBlock(funnelEvents, days)}` +
         `\n\n${buildMenuBlock(funnelEvents, days)}` +
         `\n\n${buildQuizReminderBlock(funnelEvents, quizStops.map((r) => r.reminder1QuestionNumber), days)}` +
         `\n\n${buildConsultBlock({

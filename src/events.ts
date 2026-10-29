@@ -48,6 +48,9 @@ interface LogOptions {
   // прохождение успело измениться: «Начать заново» пишет событие с
   // прежним номером, а сессию увеличивает уже после.
   attempt?: number;
+  // Экран, с которого пришло событие. Нужен там, где одного типа
+  // мало: пример разбора открывают с четырёх мест.
+  source?: string;
 }
 
 // Прохождение берём из сессии в момент записи. Сессии нет — значит
@@ -81,6 +84,7 @@ export async function logEvent(
         type,
         questionNumber: opts.questionNumber ?? null,
         attempt: opts.attempt ?? (await resolveAttempt(id)),
+        source: opts.source ?? null,
       },
     });
   } catch (error) {

@@ -14,7 +14,7 @@
 import { createHash } from "crypto";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
-import { Context, InputFile } from "grammy";
+import { Context, InlineKeyboard, InputFile } from "grammy";
 import { PROJECT_ROOT } from "./prompts";
 
 export function projectFile(relativePath: string): string {
@@ -35,11 +35,17 @@ function hashOf(path: string): string {
 export async function sendCachedDocument(
   ctx: Context,
   path: string,
-  caption?: string
+  caption?: string,
+  markup?: InlineKeyboard
 ): Promise<void> {
   const hash = hashOf(path);
   const cached = cache.get(path);
-  const options = caption ? { caption } : undefined;
+  // Кнопки вешаем на сам документ, а не на отдельное сообщение следом:
+  // иначе подпись и кнопки разъезжаются по чату.
+  const options =
+    caption || markup
+      ? { ...(caption ? { caption } : {}), ...(markup ? { reply_markup: markup } : {}) }
+      : undefined;
 
   if (cached?.hash === hash) {
     try {

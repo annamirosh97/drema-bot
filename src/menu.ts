@@ -26,6 +26,9 @@ const TEAM_PHOTO = "assets/team/anna.jpg";
 
 export const MENU_CALLBACKS = new Set([
   "menu_root",
+  // «Пример готового разбора»: разбирается не здесь, а вместе с
+  // остальными кнопками примера — см. handleExampleCallback.
+  "menu_example",
   "menu_restart",
   "menu_support",
   "menu_docs",

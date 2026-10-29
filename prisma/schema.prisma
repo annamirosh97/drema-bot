@@ -659,6 +659,10 @@ enum OfferEventType {
   consult_signup_duplicate
   consult_sent_to_specialist
   consult_status_changed
+  example_analysis_opened
+  example_plan_opened
+  example_cta_get_analysis
+  example_how_it_works
 
   // CSAT: сама оценка и текст остаются в ответах 30 и 31.
   csat_rated
@@ -717,6 +721,9 @@ model OfferEvent {
   // не различить. Ноль — событие человека, у которого сессии нет
   // (пришёл только в бот поддержки).
   attempt        Int?
+  // Откуда пришло событие, когда одного типа мало: пример разбора
+  // открывают с четырёх экранов, и без этого их не различить.
+  source         String?
   createdAt      DateTime       @default(now())
 
   @@index([telegramId])

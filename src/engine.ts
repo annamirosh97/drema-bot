@@ -71,7 +71,9 @@ import {
   marketingConsentKeyboard,
   pdConsentKeyboard,
   editMoreKeyboard,
+  exampleFinalKeyboard,
   exampleFollowupKeyboard,
+  examplePlanKeyboard,
   multiChoiceKeyboard,
   consultRequestKeyboard,
   offerChoiceKeyboard,
@@ -211,8 +213,19 @@ export async function handleIncoming(ctx: Context) {
   // ПЕРЕД тем, как дать согласие. Пустить дальше анкеты это не может:
   // «Начать заново» ведёт на экран условий, а оттуда — на
   // согласие, если его нет.
+  if (callbackData === "menu_example") {
+    return handleExampleCallback(ctx, session, "example_menu");
+  }
+
   if (callbackData && MENU_CALLBACKS.has(callbackData)) {
     return handleMenuCallback(ctx, session, callbackData);
+  }
+
+  // Пример разбора разбирается до шлюза согласия и до стадий: он
+  // ничего о человеке не собирает и не показывает, а кнопки под ним
+  // остаются в чате и должны работать откуда угодно.
+  if (callbackData?.startsWith("example_")) {
+    return handleExampleCallback(ctx, session, callbackData);
   }
 
   if (callbackData === "restart_yes") return confirmRestart(ctx, session);
@@ -2088,6 +2101,107 @@ async function handleConsultRequestStage(
   }
 
   return remindConsultRequestText(ctx);
+}
+
+// ── Пример разбора ──────────────────────────────────────────────────
+//
+// Статичный текст: через модель не проходит, о человеке ничего не
+// сохраняет и состояние онбординга не трогает. Активностью в анкете
+// это тоже не считается — её отмечает только сохранение ответа.
+
+// Защита от двойного нажатия. Четыре сообщения подряд по второму
+// тапу — худшее, что может случиться с этим экраном, и дешевле
+// держать отметку в памяти, чем писать её в базу: перезапуск в
+// худшем случае пропустит одну защиту.
+const EXAMPLE_COOLDOWN_MS = 30 * 1000;
+const exampleSentAt = new Map<string, number>();
+
+function tooSoon(telegramId: bigint, kind: string): boolean {
+  const key = `${kind}:${telegramId}`;
+  const last = exampleSentAt.get(key) ?? 0;
+  if (Date.now() - last < EXAMPLE_COOLDOWN_MS) return true;
+  exampleSentAt.set(key, Date.now());
+  return false;
+}
+
+// Пауза между сообщениями примера. Без неё четыре сообщения падают
+// одной стеной, и прочитать их невозможно.
+const EXAMPLE_PAUSE_MS = 1000;
+
+async function pause(ctx: Context) {
+  await ctx.api.sendChatAction(Number(ctx.chat!.id), "typing").catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, EXAMPLE_PAUSE_MS));
+}
+
+async function sendExampleAnalysis(ctx: Context, session: Session, source: string) {
+  await logEvent(session.telegramId, "example_analysis_opened", { source });
+  if (tooSoon(session.telegramId, "analysis")) return;
+
+  await replyStatic(ctx, texts.exampleIntro);
+  await pause(ctx);
+  await replyStatic(ctx, texts.exampleAnalysis1);
+  await pause(ctx);
+  await replyStatic(ctx, texts.exampleAnalysis2);
+  await pause(ctx);
+  return replyStatic(ctx, texts.exampleFinal(formatPrice(env.PDF_PRICE_RUB)), {
+    reply_markup: exampleFinalKeyboard(),
+  });
+}
+
+// Пример плана — тот же публичный файл с размытой памяткой, что уходит
+// по кнопке в оффере, и с тем же кэшем file_id.
+async function sendExamplePlan(ctx: Context, session: Session, source: string) {
+  await logEvent(session.telegramId, "example_plan_opened", { source });
+  if (tooSoon(session.telegramId, "plan")) return;
+
+  return sendCachedDocument(
+    ctx,
+    projectFile(EXAMPLE_PDF),
+    texts.examplePlanCaption,
+    examplePlanKeyboard()
+  );
+}
+
+// «Получить свой разбор». Ведёт туда же, куда «Получить разбор» на
+// первом экране, но с оглядкой на то, где человек сейчас: звать в
+// начало того, кто уже ждёт разбор, значит не ответить на нажатие.
+async function handleExampleCta(ctx: Context, session: Session, source: string) {
+  await logEvent(session.telegramId, "example_cta_get_analysis", { source });
+
+  const recommendation = await currentRecommendation(session.telegramId);
+  if (recommendation?.status === "sent") {
+    return replyStatic(ctx, texts.exampleAnalysisSent);
+  }
+  if (recommendation) return replyStatic(ctx, texts.exampleAnalysisPending);
+
+  // Онбординг ещё не пройден или идёт анкета — показываем текущий шаг.
+  // Он же и есть «следующий шаг после первого экрана» у новичка.
+  if (session.stage === "WELCOME") return goToTermsHealth(ctx, session);
+  return resendCurrentStep(ctx, session);
+}
+
+// Разбор кнопок примера. Источник в самом callback_data: по нему
+// видно, с какого экрана человек пришёл и куда пошёл дальше.
+const EXAMPLE_SOURCES: Record<string, string> = {
+  example_welcome: "welcome",
+  example_steps: "steps",
+  example_how_it_works: "how_it_works",
+  example_menu: "menu",
+};
+
+async function handleExampleCallback(ctx: Context, session: Session, data: string) {
+  const source = EXAMPLE_SOURCES[data];
+  if (source) return sendExampleAnalysis(ctx, session, source);
+
+  if (data === "example_plan_final") return sendExamplePlan(ctx, session, "example_final");
+  if (data === "example_cta_final") return handleExampleCta(ctx, session, "example_final");
+  if (data === "example_cta_plan") return handleExampleCta(ctx, session, "example_plan");
+
+  if (data === "example_hiw_final" || data === "example_hiw_plan") {
+    const from = data === "example_hiw_final" ? "example_final" : "example_plan";
+    await logEvent(session.telegramId, "example_how_it_works", { source: from });
+    return goToHowItWorks(ctx, session);
+  }
 }
 
 // ── Оффер платного PDF ──────────────────────────────────────────────
