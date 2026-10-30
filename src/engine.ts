@@ -24,11 +24,13 @@ import {
   takeFeedbackComment,
 } from "./feedback";
 import {
+  consultPriceText,
   remindAboutConsentOnce,
   remindConsultRequestText,
   skipConsultRequest,
   startConsultRequest,
   takeConsultRequestText,
+  takeConsultCancel,
   takeConsultContact,
   takeConsultSelfWrite,
 } from "./consult";
@@ -59,6 +61,7 @@ import {
 import { InputFile } from "grammy";
 import { getConsent, recordConsent } from "./consents";
 import {
+  CONSULT_CANCEL_BUTTON,
   CONSULT_SELF_WRITE_BUTTON,
   HEALTH_OK,
   MARKETING_NO,
@@ -270,6 +273,10 @@ export async function handleIncoming(ctx: Context) {
 
   if (messageText === CONSULT_SELF_WRITE_BUTTON) {
     if (await takeConsultSelfWrite(ctx, session)) return;
+  }
+
+  if (messageText === CONSULT_CANCEL_BUTTON) {
+    if (await takeConsultCancel(ctx, session)) return;
   }
 
   // Комментарий к вопросу обратной связи — обычное текстовое
@@ -2220,12 +2227,10 @@ async function sendExamplePdf(ctx: Context) {
 }
 
 // Цены на кнопках и в текстах — из env, с пробелом-разделителем тысяч.
+// Цена консультации приходит из consult.ts: там же она записывается в
+// заявку, и двух источников у неё быть не должно.
 function pdfPrice(): string {
   return formatPrice(env.PDF_PRICE_RUB);
-}
-
-function consultPrice(): string {
-  return formatPrice(env.CONSULT_PRICE_RUB);
 }
 
 // Шаг оффера — два сообщения: «Поддержка» без кнопок и «Выбор» с
@@ -2233,7 +2238,7 @@ function consultPrice(): string {
 // сообщения, поэтому отдельным сообщением оно и уходит.
 async function sendOfferMessages(api: Api, chatId: bigint) {
   await sendStatic(api, chatId, texts.offerSupport);
-  await sendStatic(api, chatId, texts.offerChoice(pdfPrice(), consultPrice()), {
+  await sendStatic(api, chatId, texts.offerChoice(pdfPrice(), consultPriceText()), {
     reply_markup: offerChoiceKeyboard(),
   });
 }
@@ -2294,8 +2299,8 @@ async function handleOffer(ctx: Context, session: Session, callbackData?: string
     await logOfferEvent(session.telegramId, "consult_card_opened");
     return replaceWithCard(
       ctx,
-      texts.offerConsultCard(consultPrice()),
-      offerConsultCardKeyboard(consultPrice()),
+      texts.offerConsultCard(consultPriceText()),
+      offerConsultCardKeyboard(consultPriceText()),
       env.SOFIA_CARD_URL
     );
   }
@@ -2304,7 +2309,7 @@ async function handleOffer(ctx: Context, session: Session, callbackData?: string
     await logOfferEvent(session.telegramId, "offer_back");
     return replaceWithCard(
       ctx,
-      texts.offerChoice(pdfPrice(), consultPrice()),
+      texts.offerChoice(pdfPrice(), consultPriceText()),
       offerChoiceKeyboard()
     );
   }
@@ -2327,7 +2332,7 @@ async function handleOffer(ctx: Context, session: Session, callbackData?: string
   if (callbackData === "offer_consult_request" || callbackData === "offer_consult_signup") {
     await logOfferEvent(session.telegramId, "consult_signup");
     return startConsultRequest(ctx, session, {
-      cardText: texts.offerConsultCard(consultPrice()),
+      cardText: texts.offerConsultCard(consultPriceText()),
     });
   }
 

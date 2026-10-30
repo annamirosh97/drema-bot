@@ -14,7 +14,12 @@ import type { Session, UpsellOffer } from "@prisma/client";
 import { prisma } from "./prisma";
 import { env } from "./env";
 import { formatPrice, texts } from "./texts";
-import { startConsultRequest } from "./consult";
+import {
+  consultDiscountPriceRub,
+  consultDiscountPriceText,
+  consultPriceRub,
+  startConsultRequest,
+} from "./consult";
 import { allowedToSend } from "./consents";
 import { logEvent } from "./events";
 import { isAllowed } from "./engine";
@@ -57,8 +62,9 @@ function offerUrl(): string {
   return escapeHtml(env.OFFER_URL);
 }
 
+// Цена со скидкой — из consult.ts, оттуда же она попадает в заявку.
 function price(): string {
-  return formatPrice(env.UPSELL_PRICE_RUB);
+  return consultDiscountPriceText();
 }
 
 function fullPrice(offer: UpsellOffer): string {
@@ -165,8 +171,8 @@ async function sendUpsell(api: Api, orderId: number, telegramId: bigint) {
     data: {
       telegramId,
       orderId,
-      priceRub: env.UPSELL_PRICE_RUB,
-      fullPriceRub: env.CONSULT_PRICE_RUB,
+      priceRub: consultDiscountPriceRub(),
+      fullPriceRub: consultPriceRub(),
       sentAt,
       expiresAt: expiryFor(sentAt),
     },

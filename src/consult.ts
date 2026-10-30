@@ -71,10 +71,11 @@ async function recordSpecialistTransfer(
   });
 }
 
-// В сообщении о контакте стоит ссылка на согласие — адрес приходит из
-// переменных окружения и в HTML должен быть обезврежен.
+// В сообщении о контакте стоит ссылка на согласие и имя аккаунта
+// команды — оба приходят из переменных окружения и в HTML должны быть
+// обезврежены.
 export function consultContactText(): string {
-  return texts.consultContactAsk(escapeHtml(env.PD_CONSENT_URL));
+  return texts.consultContactAsk(escapeHtml(env.PD_CONSENT_URL), escapeHtml(env.TEAM_USERNAME));
 }
 
 function adminChatId(): number {
@@ -93,6 +94,29 @@ function firstContactLabel(request: ConsultRequest): string {
   if (request.firstContact === "SPECIALIST") return "София";
   if (request.firstContact === "PARENT") return "родитель";
   return "родитель ещё не выбрал";
+}
+
+// ── Цена консультации ───────────────────────────────────────────────
+//
+// Одна точка на весь путь: карточка в оффере, предложение со скидкой
+// после плана и цена, которая записывается в заявку. Разойтись они не
+// могут, потому что читают одно и то же. В саму заявку цена пишется
+// один раз, при создании: цена сделки — та, которую человек видел,
+// и позднее изменение переменной её не переписывает.
+export function consultPriceRub(): number {
+  return env.CONSULT_PRICE_RUB;
+}
+
+export function consultDiscountPriceRub(): number {
+  return env.UPSELL_PRICE_RUB;
+}
+
+export function consultPriceText(): string {
+  return formatPrice(consultPriceRub());
+}
+
+export function consultDiscountPriceText(): string {
+  return formatPrice(consultDiscountPriceRub());
 }
 
 // ── Создание заявки ─────────────────────────────────────────────────
@@ -120,7 +144,7 @@ export async function createConsultRequest(
     data: {
       telegramId,
       attempt: await currentAttempt(telegramId),
-      priceRub: origin.priceRub ?? env.CONSULT_PRICE_RUB,
+      priceRub: origin.priceRub ?? consultPriceRub(),
       source: origin.source ?? "OFFER",
       orderId: origin.orderId ?? null,
       status: "NEW",
@@ -226,14 +250,16 @@ export async function takeConsultContact(
 
   const username = ctx.from?.username ?? request.parentUsername;
 
-  // Без username команда может не найти человека по одному телефону,
-  // поэтому первым пишет родитель — но контакт мы всё равно приняли.
+  // Поделился контактом — значит, первой пишет команда, и без username
+  // тоже: по номеру телефона человека можно найти, а переводить его на
+  // «напишите сами» за него бот не вправе. Как проверить настройку
+  // поиска по номеру, сказано в подтверждении.
   await prisma.consultRequest.update({
     where: { id: request.id },
     data: {
       parentPhone: contact.phone_number,
       contactConsentAt: new Date(),
-      firstContact: username ? "TEAM" : "PARENT",
+      firstContact: "TEAM",
       parentUsername: username,
     },
   });
@@ -281,6 +307,29 @@ export async function takeConsultSelfWrite(ctx: Context, session: Session): Prom
   return true;
 }
 
+// Нажали «Отменить заявку». Заявка закрывается как не дошедшая до
+// оплаты, команде не уходит ничего: контакта родитель не оставил, и
+// работать с такой заявкой некому. Возвращает false, если отменять
+// нечего, — значит, это просто совпавший с подписью кнопки текст.
+export async function takeConsultCancel(ctx: Context, session: Session): Promise<boolean> {
+  const request = await awaitingContact(session.telegramId);
+  if (!request) return false;
+
+  await setConsultStatus(request.id, "LOST", "отменил до контакта");
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "FAKE_DOOR_OFFER" },
+  });
+
+  // Отдельного события не завожу: setConsultStatus уже пишет
+  // consult_status_changed, а в статистике отмена видна по причине
+  // «отменил до контакта» — причины и так считаются по заявкам.
+  await replyStatic(ctx, texts.consultRequestCancelled, {
+    reply_markup: { remove_keyboard: true },
+  });
+  return true;
+}
+
 // ── Шаг 2: что хотите обсудить ──────────────────────────────────────
 
 // Конец пути: подтверждение родителю и уведомление команде. Текст
@@ -303,7 +352,10 @@ async function finishConsultRequest(ctx: Context, session: Session, request: Con
   await replyStatic(
     ctx,
     request.firstContact === "TEAM"
-      ? texts.consultRequestAccepted(escapeHtml(env.TEAM_USERNAME))
+      ? texts.consultRequestAccepted(
+          escapeHtml(env.TEAM_USERNAME),
+          Boolean(finished.parentUsername)
+        )
       : texts.consultRequestSelfWrite(escapeHtml(env.TEAM_USERNAME), request.id),
     { reply_markup: { remove_keyboard: true } }
   );
@@ -353,7 +405,10 @@ export async function finishStaleConsultRequests(api: Api): Promise<void> {
         api,
         request.session.chatId,
         request.firstContact === "TEAM"
-          ? texts.consultRequestAccepted(escapeHtml(env.TEAM_USERNAME))
+          ? texts.consultRequestAccepted(
+              escapeHtml(env.TEAM_USERNAME),
+              Boolean(request.parentUsername)
+            )
           : texts.consultRequestSelfWrite(escapeHtml(env.TEAM_USERNAME), request.id),
         { reply_markup: { remove_keyboard: true } }
       );
@@ -478,21 +533,41 @@ function lostReasonKeyboard(id: number): InlineKeyboard {
   return keyboard;
 }
 
-// Как родителя найти: username, телефон, или прямое предупреждение, что
-// ни того ни другого нет и писать будет он сам.
+// Как родителя найти: username или прямая отметка, что его нет, плюс
+// телефон, если родитель им поделился. «Родитель напишет сам» — только
+// когда он сам выбрал этот путь: отсутствие username такой пометкой
+// больше не считается, команда находит человека по номеру.
 function parentLine(request: ConsultRequest): string {
-  const parts: string[] = [];
-  if (request.parentUsername) parts.push(`@${request.parentUsername}`);
+  const parts: string[] = [request.parentUsername ? `@${request.parentUsername}` : "без username"];
   if (request.parentPhone) parts.push(request.parentPhone);
-  if (!parts.length) parts.push("без username — напишет сам");
+  if (request.firstContact === "PARENT") parts.push("Родитель напишет сам");
   return parts.join(" · ");
 }
 
-async function babyAge(telegramId: bigint, attempt: number): Promise<string> {
-  const answer = await prisma.answer.findFirst({
+// Возраст малыша для карточки и пакета. Сначала смотрим прохождение, из
+// которого пришла заявка — заявка привязана именно к нему, — а если
+// возраста там нет, берём последнее прохождение, где он есть. null
+// означает «неизвестен»: подпись выбирает вызывающий, потому что в
+// карточке у неё нет слова «мес».
+async function babyAge(telegramId: bigint, attempt: number): Promise<string | null> {
+  const own = await prisma.answer.findFirst({
     where: { telegramId, attempt, questionNumber: 1 },
   });
-  return answer?.answerText ?? "не указан";
+  if (own) return own.answerText;
+
+  const anyAttempt = await prisma.answer.findFirst({
+    where: { telegramId, questionNumber: 1 },
+    orderBy: { attempt: "desc" },
+  });
+  if (anyAttempt) return anyAttempt.answerText;
+
+  // Анкета есть, а возраста в ней нет — это поломка в другом месте, и
+  // заметить её по карточкам глазами не выйдет. Пишем в логи.
+  const answered = await prisma.answer.findFirst({ where: { telegramId } });
+  if (answered) {
+    console.error(`У #${telegramId} есть ответы анкеты, но нет возраста (вопрос 1).`);
+  }
+  return null;
 }
 
 // Цена и откуда пришла заявка одной строкой: по ней видно, обычная это
@@ -500,7 +575,7 @@ async function babyAge(telegramId: bigint, attempt: number): Promise<string> {
 function priceLine(request: ConsultRequest): string {
   const kind =
     request.source === "AFTER_PDF"
-      ? `после плана, скидка вместо ${formatPrice(env.CONSULT_PRICE_RUB)} ₽`
+      ? `после плана, скидка вместо ${consultPriceText()} ₽`
       : "после разбора";
   return `Цена: ${formatPrice(request.priceRub)} ₽ · ${kind}`;
 }
@@ -515,10 +590,12 @@ async function buildRequestCard(request: ConsultRequest): Promise<string> {
       ? `${STATUS_LABELS.LOST} · ${request.lostReason}`
       : STATUS_LABELS[request.status] ?? request.status;
 
+  const age = await babyAge(request.telegramId, request.attempt);
+
   return (
     `🗓 Заявка на консультацию №${request.id}\n` +
     `Родитель: ${parentLine(request)}\n` +
-    `Малыш: ${await babyAge(request.telegramId, request.attempt)} мес\n` +
+    `Малыш: ${age ? `${age} мес` : "возраст не указан"}\n` +
     `Запрос: ${request.requestText ? `«${request.requestText}»` : "не указан"}\n` +
     `${priceLine(request)}\n` +
     `Статус: ${status}\n` +
@@ -535,8 +612,8 @@ function teamChatIds(): number[] {
   return ids;
 }
 
-// Карточка заявки и готовый текст первого сообщения. Шаблон уходит
-// моноширинным блоком: нажатие копирует его целиком.
+// Карточка заявки. Готовых текстов для переписки бот не присылает:
+// команда пишет от себя.
 export async function sendRequestCard(api: Api, requestId: number): Promise<void> {
   const request = await prisma.consultRequest.findUnique({ where: { id: requestId } });
   if (!request) return console.error(`Заявка #${requestId} не найдена, карточка не отправлена.`);
@@ -547,9 +624,6 @@ export async function sendRequestCard(api: Api, requestId: number): Promise<void
   for (const chatId of teamChatIds()) {
     try {
       await api.sendMessage(chatId, card, markup ? { reply_markup: markup } : undefined);
-      await api.sendMessage(chatId, `<code>${escapeHtml(texts.teamFirstMessage)}</code>`, {
-        parse_mode: "HTML",
-      });
     } catch (error) {
       // Аккаунт команды мог не нажать /start — это не повод терять
       // заявку: у админа она всё равно есть.
@@ -577,7 +651,7 @@ export async function buildConsultPackage(request: ConsultRequest): Promise<stri
     `Телефон: ${request.parentPhone ?? "не передан"}`,
     `Telegram ID: ${request.telegramId}`,
     `Кто пишет первым: ${firstContactLabel(request)}`,
-    `Возраст малыша: ${await babyAge(request.telegramId, request.attempt)}`,
+    `Возраст малыша: ${(await babyAge(request.telegramId, request.attempt)) ?? "не указан"}`,
     ...(request.source === "AFTER_PDF"
       ? [`Источник: после покупки PDF`, `Цена: ${formatPrice(request.priceRub)} ₽ (скидка)`]
       : []),
@@ -665,16 +739,11 @@ export async function sendConsultPackage(api: Api, requestId: number): Promise<v
   // уходит без повторного рендера. Нет файла — заявку это не ломает.
   const plan = await planFile(request);
 
-  const intro = texts.teamIntroMessage(
-    request.parentUsername ? `@${request.parentUsername}` : "родитель",
-    await babyAge(request.telegramId, request.attempt),
-    request.requestText ?? "обсудим в чате"
-  );
-
+  // Только файлы: текст знакомства для общего чата бот больше не
+  // присылает — команда знакомит сама.
   async function sendTo(chatId: number) {
     await api.sendDocument(chatId, new InputFile(Buffer.from(packageText, "utf8"), fileName));
     if (plan) await api.sendDocument(chatId, new InputFile(plan.bytes, plan.name));
-    await api.sendMessage(chatId, `<code>${escapeHtml(intro)}</code>`, { parse_mode: "HTML" });
   }
 
   for (const chatId of teamChatIds()) {

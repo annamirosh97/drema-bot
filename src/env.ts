@@ -58,15 +58,12 @@ export const env = {
   // поэтому это адрес, а не файл. Пустой — карточка без фото.
   // Telegram кэширует превью по адресу: меняя фото, меняй ?v=.
   SOFIA_CARD_URL: legalUrl("SOFIA_CARD_URL", "/static/sofia_card.jpg?v=1"),
-  // Ссылки на оплату консультации: подставляются в шаблон сообщения,
-  // который бот присылает команде. Не заданы — в шаблоне останется
-  // «{ссылка на оплату}», и команда подставит руками.
   // Сколько ждать ответа на «что хотите обсудить», прежде чем счесть
   // заявку законченной: контакт уже есть, и команде пора работать.
   CONSULT_REQUEST_TIMEOUT_MIN:
     parseInt(process.env.CONSULT_REQUEST_TIMEOUT_MIN ?? "30", 10) || 30,
-  CONSULT_PAY_URL: process.env.CONSULT_PAY_URL ?? "",
-  CONSULT_PAY_URL_DISCOUNT: process.env.CONSULT_PAY_URL_DISCOUNT ?? "",
+  // CONSULT_PAY_URL и CONSULT_PAY_URL_DISCOUNT убраны 30.10.2026
+  // вместе с шаблоном сообщения об оплате: ссылку присылает команда.
   CONSULT_SPECIALIST_TELEGRAM_ID: process.env.CONSULT_SPECIALIST_TELEGRAM_ID ?? "",
   // Предложение консультации со скидкой тем, кто купил план: цена,
   // сколько дней оно действует и через сколько минут после отправки PDF

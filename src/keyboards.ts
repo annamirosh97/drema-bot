@@ -409,17 +409,22 @@ export function exampleFollowupKeyboard(price: string): InlineKeyboard {
 // подписью — поэтому подпись вынесена в константу и сверяется с текстом.
 // Первым родителю пишет команда, а не София, — отсюда и подпись.
 export const CONSULT_SELF_WRITE_BUTTON = "Напишу команде сам(а)";
+export const CONSULT_CANCEL_BUTTON = "Отменить заявку";
 
 // Шаг «что хотите обсудить»: можно пропустить.
 export function consultRequestKeyboard(): InlineKeyboard {
   return new InlineKeyboard().text("Пропустить", "consult_request_skip");
 }
 
+// Основной путь — «Поделиться контактом»: дальше пишет команда. Два
+// других варианта родитель выбирает сам, бот на них не переводит.
 export function consultConsentKeyboard(): Keyboard {
   return new Keyboard()
     .requestContact("Поделиться контактом")
     .row()
     .text(CONSULT_SELF_WRITE_BUTTON)
+    .row()
+    .text(CONSULT_CANCEL_BUTTON)
     .resized()
     .oneTime();
 }
