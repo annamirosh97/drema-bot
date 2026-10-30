@@ -1465,8 +1465,7 @@ async function consumeAnswer(
     await markQuestionAnswered(ctx, question, answerText);
 
     // Красных и жёлтых флагов в анкете больше нет: с 15.10.2026 бот не
-    // спрашивает о здоровье, а недоношенность учитывается методологией
-    // через скорректированный возраст, а не через флаг.
+    // спрашивает о здоровье, а вопрос о сроке рождения убран 30.10.2026.
     await saveQuestionAnswer(session.telegramId, qNum, answerText);
     await prisma.session.update({
       where: { telegramId: session.telegramId },

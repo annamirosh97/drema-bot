@@ -70,7 +70,7 @@ export const WRITER_PROMPT = stripLeadingHtmlComment(readProjectFile("prompts/pa
 
 export type RelaxationGroup = "4-6" | "6-9" | "9-12";
 
-// Возраст — скорректированный при недоношенности (см. вызывающий код).
+// Возраст из анкеты, в полных месяцах.
 export function relaxationGroupForAge(months: number): RelaxationGroup {
   if (months < 6) return "4-6";
   if (months < 9) return "6-9";
