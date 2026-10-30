@@ -49,13 +49,15 @@ export function welcomeKeyboard(): InlineKeyboard {
 
 // «Мой подход» — единственная новая кнопка онбординга: прежний
 // how_it_works занят экраном трёх шагов.
-export function stepsKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("Начать", "start")
-    .row()
-    .text("Пример разбора", "example_steps")
-    .row()
-    .text("Мой подход", "my_approach");
+//
+// Тому, кто пример уже открывал, второй раз его не предлагаем: человек
+// пришёл сюда как раз из примера, и повторная кнопка уводила бы его по
+// кругу. На первом экране кнопка остаётся всегда — там она часть
+// первого знакомства.
+export function stepsKeyboard(seenExample = false): InlineKeyboard {
+  const keyboard = new InlineKeyboard().text("Начать", "start").row();
+  if (!seenExample) keyboard.text("Пример разбора", "example_steps").row();
+  return keyboard.text("Мой подход", "my_approach");
 }
 
 // Не в основном пути с 27.10.2026, см. texts.welcomeValue.
@@ -205,29 +207,33 @@ export function pdRevokeConfirmKeyboard(): InlineKeyboard {
 // «Как я работаю». Клавиатура здесь, а не в движке: тот же экран
 // собирался в трёх местах — при переходе, при повторе и при вводе
 // текста вместо нажатия, — и кнопка расходилась между ними.
-export function howItWorksKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("Начать", "start")
-    .row()
-    .text("Пример разбора", "example_how_it_works");
+export function howItWorksKeyboard(seenExample = false): InlineKeyboard {
+  const keyboard = new InlineKeyboard().text("Начать", "start");
+  if (!seenExample) keyboard.row().text("Пример разбора", "example_how_it_works");
+  return keyboard;
 }
 
 // Под финальным сообщением примера и под примером плана. Источник в
-// callback_data: по нему видно, откуда человек пошёл дальше.
+// callback_data: по нему видно, откуда человек пошёл дальше. Данные
+// прежние и у переименованных кнопок: под старыми сообщениями в чатах
+// висят те же callback, и вести они должны туда же, куда новые.
+//
+// «Больше о Дрёме» открывает экран трёх шагов, а не «Как я работаю»:
+// из примера логичнее вернуться к тому, как устроен весь путь.
 export function exampleFinalKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text("Получить свой разбор", "example_cta_final")
+    .text("Получить разбор", "example_cta_final")
     .row()
     .text("Пример персонального плана", "example_plan_final")
     .row()
-    .text("Как я работаю", "example_hiw_final");
+    .text("Больше о Дрёме", "example_hiw_final");
 }
 
 export function examplePlanKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text("Получить свой разбор", "example_cta_plan")
+    .text("Получить разбор", "example_cta_plan")
     .row()
-    .text("Как я работаю", "example_hiw_plan");
+    .text("Больше о Дрёме", "example_hiw_plan");
 }
 
 export const HEALTH_OK = "Ничего из этого";

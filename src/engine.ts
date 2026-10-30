@@ -404,7 +404,7 @@ export async function resendCurrentStep(ctx: Context, session: Session) {
     case "STEPS":
       return sendSteps(ctx);
     case "HOW_IT_WORKS":
-      return replyStatic(ctx, texts.howItWorks, { reply_markup: howItWorksKeyboard() });
+      return sendHowItWorks(ctx);
     case "TERMS":
     case "TERMS_HEALTH":
     case "HEALTH_SCREEN":
@@ -881,7 +881,19 @@ async function handleWelcomeValue(ctx: Context, session: Session, callbackData?:
 // на него уводит «Как я работаю» с приветствия.
 async function sendSteps(ctx: Context) {
   await logOnboarding(ctx.from!.id, "onb_steps");
-  return replyStatic(ctx, texts.steps, { reply_markup: stepsKeyboard() });
+  return replyStatic(ctx, texts.steps, {
+    reply_markup: stepsKeyboard(await hasSeenExample(ctx.from!.id)),
+  });
+}
+
+// Экран «Как я работаю» собирается из трёх мест: при переходе, при
+// повторе шага и при тексте вместо нажатия. Поэтому он одной функцией:
+// клавиатура у него теперь зависит от того, видел ли человек пример, и
+// разъехаться между этими местами она не должна.
+async function sendHowItWorks(ctx: Context) {
+  return replyStatic(ctx, texts.howItWorks, {
+    reply_markup: howItWorksKeyboard(await hasSeenExample(ctx.from!.id)),
+  });
 }
 
 async function goToSteps(ctx: Context, session: Session) {
@@ -906,12 +918,12 @@ async function goToHowItWorks(ctx: Context, session: Session) {
     data: { stage: "HOW_IT_WORKS" },
   });
   await logOnboarding(ctx.from!.id, "onb_how_it_works");
-  return replyStatic(ctx, texts.howItWorks, { reply_markup: howItWorksKeyboard() });
+  return sendHowItWorks(ctx);
 }
 
 async function handleHowItWorks(ctx: Context, session: Session, callbackData?: string) {
   if (callbackData === "start") return goToTermsHealth(ctx, session);
-  return replyStatic(ctx, texts.howItWorks, { reply_markup: howItWorksKeyboard() });
+  return sendHowItWorks(ctx);
 }
 
 // ── Обезличенный счётчик ────────────────────────────────────────────
@@ -2187,6 +2199,23 @@ async function handleExampleCta(ctx: Context, session: Session, source: string) 
   return resendCurrentStep(ctx, session);
 }
 
+// Открывал ли человек пример разбора. Отдельного поля в базе под это
+// нет и не нужно: событие example_analysis_opened пишется с telegram id
+// при каждом открытии, и одного запроса по нему достаточно. Сбой чтения
+// не повод не показать экран — тогда просто считаем, что не видел.
+async function hasSeenExample(telegramId: bigint | number): Promise<boolean> {
+  try {
+    const seen = await prisma.offerEvent.findFirst({
+      where: { telegramId: BigInt(telegramId), type: "example_analysis_opened" },
+      select: { id: true },
+    });
+    return Boolean(seen);
+  } catch (error) {
+    console.error(`Не удалось проверить, видел ли #${telegramId} пример:`, error);
+    return false;
+  }
+}
+
 // Разбор кнопок примера. Источник в самом callback_data: по нему
 // видно, с какого экрана человек пришёл и куда пошёл дальше.
 const EXAMPLE_SOURCES: Record<string, string> = {
@@ -2204,10 +2233,13 @@ async function handleExampleCallback(ctx: Context, session: Session, data: strin
   if (data === "example_cta_final") return handleExampleCta(ctx, session, "example_final");
   if (data === "example_cta_plan") return handleExampleCta(ctx, session, "example_plan");
 
+  // «Больше о Дрёме» ведёт на экран трёх шагов. Данные callback и имя
+  // события прежние: первое — ради кнопок под старыми сообщениями,
+  // второе — чтобы не рвать статистику пополам сменой названия.
   if (data === "example_hiw_final" || data === "example_hiw_plan") {
     const from = data === "example_hiw_final" ? "example_final" : "example_plan";
     await logEvent(session.telegramId, "example_how_it_works", { source: from });
-    return goToHowItWorks(ctx, session);
+    return goToSteps(ctx, session);
   }
 }
 
