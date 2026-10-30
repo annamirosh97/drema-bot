@@ -10,16 +10,29 @@ function required(name: string): string {
   return value;
 }
 
-// Адрес юридического документа: либо задан явно, либо собирается из
-// публичного адреса приложения и ведёт на нашу страницу-заглушку. Если
-// публичный адрес не задан, остаётся пустым — это видно сразу, в отличие
-// от битой ссылки.
+// Адрес нашей собственной страницы: либо задан явно, либо собирается из
+// публичного адреса приложения. Если публичный адрес не задан, остаётся
+// пустым — это видно сразу, в отличие от битой ссылки.
 function legalUrl(variable: string, fallbackPath: string): string {
   const explicit = (process.env[variable] ?? "").trim();
   if (explicit) return explicit.replace(/\/+$/, "");
 
   const base = (process.env.PUBLIC_BASE_URL ?? "").replace(/\/+$/, "");
   return base ? `${base}${fallbackPath}` : "";
+}
+
+// Адрес юридического документа, опубликованного на сайте. Берётся как
+// задан, без отрезания слеша на конце: этот адрес уходит человеку в
+// сообщении и ложится в журнал согласий, и там он должен быть ровно тем,
+// что опубликован, а не адресом, с которого сайт делает редирект.
+//
+// Запасного пути на нашу страницу-заглушку здесь нет намеренно. Пока
+// документов не было, такая подстановка спасала от пустой ссылки; после
+// публикации она прячет незаданную переменную — родитель получил бы
+// ссылку на черновик, а в журнал легла бы она же. Без переменной бот не
+// стартует, см. loadLegalDocuments.
+function publishedDocUrl(variable: string): string {
+  return (process.env[variable] ?? "").trim();
 }
 
 export const env = {
@@ -103,14 +116,13 @@ export const env = {
   PUBLIC_BASE_URL: (process.env.PUBLIC_BASE_URL ?? "").replace(/\/+$/, ""),
   // Контакты на финальной странице PDF. Если не заданы, строки не
   // выводятся вовсе — пустое «Почта для связи:» выглядело бы небрежно.
-  OFFER_URL: legalUrl("OFFER_URL", "/offer"),
+  OFFER_URL: publishedDocUrl("OFFER_URL"),
   CONTACT_EMAIL: process.env.CONTACT_EMAIL ?? "",
-  // Адреса юридических документов. Пока текстов нет, по умолчанию ведут
-  // на страницы-заглушки этого же приложения — пустая ссылка в сообщении
-  // о персональных данных недопустима.
-  PRIVACY_POLICY_URL: legalUrl("PRIVACY_POLICY_URL", "/privacy"),
-  PD_CONSENT_URL: legalUrl("PD_CONSENT_URL", "/consent"),
-  MARKETING_CONSENT_URL: legalUrl("MARKETING_CONSENT_URL", "/marketing-consent"),
+  // Адреса юридических документов на сайте. Обязательные: без них бот не
+  // стартует, см. loadLegalDocuments.
+  PRIVACY_POLICY_URL: publishedDocUrl("PRIVACY_POLICY_URL"),
+  PD_CONSENT_URL: publishedDocUrl("PD_CONSENT_URL"),
+  MARKETING_CONSENT_URL: publishedDocUrl("MARKETING_CONSENT_URL"),
   // Требовать ли согласие на рассылку для опросов о впечатлениях (CSAT).
   // По умолчанию нет: это не реклама, а вопрос о качестве услуги, за
   // которой человек пришёл сам. Флаг оставлен на случай, если юрист

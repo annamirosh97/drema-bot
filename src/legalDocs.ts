@@ -16,15 +16,40 @@ import { prisma } from "./prisma";
 import { env } from "./env";
 import { PROJECT_ROOT } from "./prompts";
 
-// Версия-заглушка, которая заводится, пока юрист не прислал тексты.
-const DRAFT_VERSION = "draft-1";
+// Версии, опубликованные на сайте. Новая версия документа — новая
+// строка здесь и новый файл legal/<папка>/<версия>.md рядом.
+//
+// Дата вступления взята из самого документа: на странице каждого стоит
+// «редакция от …», и эта же дата в номере версии. Если документ выложен
+// на сайт позже своей редакции, поправь здесь дату выкладки — строка в
+// базе заводится один раз, по первому старту с этой версией.
+//
+// Версии-заглушки draft-1 в этой таблице больше нет, и бот её не
+// трогает: строки заглушек остаются в базе как были, потому что на них
+// ссылаются записи журнала, сделанные до публикации.
+const VERSIONS: Record<LegalDocType, { version: string; effectiveFrom: string }> = {
+  PRIVACY_POLICY: { version: "2026-10-22", effectiveFrom: "2026-10-22" },
+  PD_CONSENT: { version: "2026-10-26", effectiveFrom: "2026-10-26" },
+  MARKETING_CONSENT: { version: "2026-10-26", effectiveFrom: "2026-10-26" },
+  OFFER: { version: "2026-10-26", effectiveFrom: "2026-10-26" },
+};
 
-// Папка документа и переменная окружения с его адресом.
-const DOCUMENTS: Record<LegalDocType, { folder: string; url: () => string }> = {
-  PRIVACY_POLICY: { folder: "privacy-policy", url: () => env.PRIVACY_POLICY_URL },
-  PD_CONSENT: { folder: "pd-consent", url: () => env.PD_CONSENT_URL },
-  MARKETING_CONSENT: { folder: "marketing-consent", url: () => env.MARKETING_CONSENT_URL },
-  OFFER: { folder: "offer", url: () => env.OFFER_URL },
+// Папка документа и переменная окружения с его адресом. Имя переменной
+// нужно в сообщении об ошибке: «не задан адрес» без него заставляет
+// лезть в код посреди упавшего деплоя.
+const DOCUMENTS: Record<LegalDocType, { folder: string; variable: string; url: () => string }> = {
+  PRIVACY_POLICY: {
+    folder: "privacy-policy",
+    variable: "PRIVACY_POLICY_URL",
+    url: () => env.PRIVACY_POLICY_URL,
+  },
+  PD_CONSENT: { folder: "pd-consent", variable: "PD_CONSENT_URL", url: () => env.PD_CONSENT_URL },
+  MARKETING_CONSENT: {
+    folder: "marketing-consent",
+    variable: "MARKETING_CONSENT_URL",
+    url: () => env.MARKETING_CONSENT_URL,
+  },
+  OFFER: { folder: "offer", variable: "OFFER_URL", url: () => env.OFFER_URL },
 };
 
 export function legalFilePath(type: LegalDocType, version: string): string {
@@ -32,31 +57,62 @@ export function legalFilePath(type: LegalDocType, version: string): string {
 }
 
 function hashOf(type: LegalDocType, version: string): string {
-  return createHash("sha256").update(readFileSync(legalFilePath(type, version))).digest("hex");
+  const path = legalFilePath(type, version);
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch (error) {
+    throw new Error(
+      `Нет файла с текстом документа ${type} версии ${version}: ожидаю ${path}. ` +
+        `Без текста нечего хэшировать, а запись журнала без хэша бесполезна.`
+    );
+  }
 }
 
 // Активная версия типа — последняя по effectiveFrom. Держим в памяти:
 // документы меняются раз в месяцы, а спрашиваем мы их на каждое согласие.
 const active = new Map<LegalDocType, LegalDocument>();
 
-// Заводит версии-заглушки, если их ещё нет, и запоминает активные.
-// Вызывается один раз при старте: без документов записать согласие
-// нельзя, поэтому ошибка здесь должна уронить запуск, а не всплыть
-// посреди онбординга у живого человека.
+// Заводит строки опубликованных версий, если их ещё нет, и запоминает
+// активные. Вызывается один раз при старте: без документов записать
+// согласие нельзя, поэтому ошибка здесь должна уронить запуск, а не
+// всплыть посреди онбординга у живого человека.
+//
+// Строка версии создаётся один раз и больше не меняется. Это главное
+// правило этого файла: адрес и хэш, записанные в строке, — то, на что
+// человек соглашался, и перезапись превратила бы журнал в набор ссылок
+// на другой текст. Переехал адрес или поправился текст — это новая
+// версия, а не правка старой строки.
 export async function loadLegalDocuments(): Promise<void> {
   for (const type of Object.keys(DOCUMENTS) as LegalDocType[]) {
-    const sha256 = hashOf(type, DRAFT_VERSION);
+    const { version, effectiveFrom } = VERSIONS[type];
     const url = DOCUMENTS[type].url();
+    if (!url) {
+      throw new Error(
+        `Не задан адрес документа ${type}: переменная ${DOCUMENTS[type].variable}. ` +
+          `Записать согласие без ссылки на документ нельзя — задай переменную и перезапусти.`
+      );
+    }
+    const sha256 = hashOf(type, version);
 
-    // Адрес и хэш обновляем: пока это заглушка, адрес может переехать
-    // вместе с доменом, а текст — поправиться. Как только появится
-    // настоящая версия, заглушку перестанут показывать, и трогать её
-    // будет уже нечего.
-    await prisma.legalDocument.upsert({
-      where: { type_version: { type, version: DRAFT_VERSION } },
-      update: { url, sha256 },
-      create: { type, version: DRAFT_VERSION, url, sha256, effectiveFrom: new Date("2026-01-01") },
+    const existing = await prisma.legalDocument.findUnique({
+      where: { type_version: { type, version } },
     });
+
+    if (!existing) {
+      await prisma.legalDocument.create({
+        data: { type, version, url, sha256, effectiveFrom: new Date(effectiveFrom) },
+      });
+    } else if (existing.sha256 !== sha256 || existing.url !== url) {
+      // Не падаем и не переписываем: бот работает, а строка остаётся
+      // той, на которую ссылаются записи. Но сказать об этом нужно
+      // громко — расхождение означает, что документ изменили, не
+      // заведя новую версию.
+      console.error(
+        `Документ ${type} версии ${version} в базе не совпадает с тем, что в репозитории и в ` +
+          `переменных: ${existing.url !== url ? "разный адрес" : "разный текст"}. ` +
+          `Строку не меняю — заведи новую версию.`
+      );
+    }
 
     const latest = await prisma.legalDocument.findFirst({
       where: { type },
