@@ -2037,29 +2037,51 @@ export async function handleGotoCommand(ctx: Context, arg: string) {
   return sendQuestionPrompt(ctx, question, []);
 }
 
-// /reset — стереть ответы человека совсем и вернуть его на приветствие.
-// Ждущую отправки рекомендацию тоже удаляем: анкета, под которую её
-// готовили, только что стёрлась, и висеть в /pending ей незачем.
-// События оффера намеренно остаются — на них держится /stats.
+// /reset — стереть свой след в боте и вернуться на приветствие, чтобы
+// пройти путь так, как его видит новый человек.
 //
-// Только для админа, и это важно. Обычный человек начинает заново
-// командой /restart, которая ничего не удаляет (см. restart.ts): его
-// ответы — это данные о ребёнке, и бот их не стирает по нажатию. А
-// здесь нужен именно чистый лист — для прогона анкеты на себе, когда
-// прошлые прохождения в базе только мешают.
+// Только для админа, и это важно. Команда удаляет данные без
+// подтверждения, а обычный человек начинает заново через /restart,
+// который не удаляет ничего: его ответы — это данные о ребёнке, и бот
+// не стирает их по нажатию кнопки.
+//
+// Чего команда НЕ трогает:
+//  - журнал согласий: он append-only и защищён триггером в базе. Чтобы
+//    экраны согласий показались заново, согласия отзывают через /data —
+//    это настоящее действие человека, и в журнале ему место;
+//  - переписку с ботом поддержки: это другой продукт, и к прогону
+//    анкеты она отношения не имеет;
+//  - ApiCall: это расход на модель, то есть бухгалтерия, а не состояние
+//    человека.
 export async function handleResetCommand(ctx: Context) {
   const from = ctx.from;
   if (!from || !ctx.chat) return;
+  // Молча: команды, которой у человека нет, для него не существует.
   if (String(from.id) !== env.ADMIN_TELEGRAM_ID) return;
 
   const telegramId = BigInt(from.id);
   await getOrCreateSession(telegramId, BigInt(ctx.chat.id), from.first_name);
 
-  await prisma.answer.deleteMany({ where: { telegramId } });
-  await prisma.recommendation.deleteMany({ where: { telegramId } });
-  // Иначе прохождение осталось бы со статусом «завершено» при пустой
-  // анкете, и в админке это выглядело бы как потерянные ответы.
-  await prisma.questionnaireAttempt.deleteMany({ where: { telegramId } });
+  // Одной транзакцией: половина вычищенного состояния хуже, чем
+  // нетронутое, — по ней непонятно, что именно увидишь в прогоне.
+  // Порядок важен только для заявок: ссылка на них у предложения со
+  // скидкой снимается сама (onDelete: SetNull), но пусть сначала уйдёт
+  // предложение. Черновики и отзывы по заказам удаляются каскадом.
+  const [events, orders, consults] = await prisma.$transaction([
+    prisma.offerEvent.deleteMany({ where: { telegramId } }),
+    prisma.order.deleteMany({ where: { telegramId } }),
+    prisma.consultRequest.deleteMany({ where: { telegramId } }),
+    prisma.upsellOffer.deleteMany({ where: { telegramId } }),
+    prisma.quizReminder.deleteMany({ where: { telegramId } }),
+    prisma.analysisFeedback.deleteMany({ where: { telegramId } }),
+    prisma.suppressedMessage.deleteMany({ where: { telegramId } }),
+    prisma.answer.deleteMany({ where: { telegramId } }),
+    prisma.recommendation.deleteMany({ where: { telegramId } }),
+    // Иначе прохождение осталось бы со статусом «завершено» при пустой
+    // анкете, и в админке это выглядело бы как потерянные ответы.
+    prisma.questionnaireAttempt.deleteMany({ where: { telegramId } }),
+  ]);
+
   await prisma.session.update({
     where: { telegramId },
     data: {
@@ -2075,7 +2097,24 @@ export async function handleResetCommand(ctx: Context) {
     },
   });
 
-  await replyStatic(ctx, texts.resetDone);
+  // Служебная сводка вместо прежнего «Начинаем заново»: команду видит
+  // только админ, и ему важно знать, что именно стёрлось и чего в этом
+  // прогоне всё равно не будет.
+  const pd = await getConsent(telegramId, "PD_PROCESSING");
+  const marketing = await getConsent(telegramId, "MARKETING");
+  const consentLine =
+    pd.action === "GRANTED" || marketing.action === "GRANTED" || marketing.action === "DECLINED"
+      ? "\n\n⚠️ Согласия остались: экраны про данные и рассылку не покажутся. " +
+        "Чтобы увидеть и их, отзови согласия через /data и нажми /reset ещё раз."
+      : "";
+
+  await replyStatic(
+    ctx,
+    `Чистый лист. Удалено: событий ${events.count}, заказов ${orders.count}, ` +
+      `заявок ${consults.count}, плюс ответы анкеты, разборы, прохождения, ` +
+      `напоминания и запланированные вопросы о впечатлениях.` +
+      `\n\nЖурнал согласий не тронут — он только пополняется.${consentLine}`
+  );
   return sendWelcome(ctx);
 }
 
