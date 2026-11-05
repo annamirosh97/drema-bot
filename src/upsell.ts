@@ -135,9 +135,17 @@ export async function sendDueUpsells(api: Api) {
         await logUpsellEvent(order.telegramId, "upsell_skipped");
         continue;
       }
-      // Это предложение, а не то, за чем человек пришёл: без согласия
-      // на рассылку оно не уходит, и отказ записывается.
-      if (!(await allowedToSend(order.telegramId, "MARKETING", "upsell_offer"))) {
+      // Решение Анны от 05.11.2026: предложение уходит всем, кто купил
+      // план, в том числе отказавшимся от рассылки. Поэтому категория
+      // SERVICE, а не MARKETING: согласие на обработку данных всё равно
+      // обязательно, без него бот молчит совсем.
+      //
+      // Оговорка на будущее: в политике (п. 4.1.7) и в согласии на
+      // рассылку правовым основанием для рекламных сообщений названо
+      // отдельное согласие по ст. 18 закона «О рекламе». Предложение
+      // другой платной услуги со скидкой и сроком под это описание
+      // попадает, и расхождение здесь осознанное, а не забытое.
+      if (!(await allowedToSend(order.telegramId, "SERVICE", "upsell_offer"))) {
         await logUpsellEvent(order.telegramId, "upsell_skipped");
         continue;
       }
