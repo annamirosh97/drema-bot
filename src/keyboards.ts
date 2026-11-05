@@ -325,7 +325,16 @@ export function pdfResultKeyboard(): InlineKeyboard {
     .text(PDF_RESULTS[3].label, PDF_RESULTS[3].data);
 }
 
-export function feedbackSkipKeyboard(kind: "afb" | "pfb"): InlineKeyboard {
+// Оценка плана: цифры в один ряд, как в CSAT. Подписи «😕» и «😊» по
+// краям стоят в самом тексте вопроса, а не на кнопках: на кнопке эмодзи
+// рядом с цифрой читается хуже.
+export function pdfRatingKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  for (let i = 1; i <= 5; i++) kb.text(String(i), `prt_${i}`);
+  return kb;
+}
+
+export function feedbackSkipKeyboard(kind: "afb" | "pfb" | "prt"): InlineKeyboard {
   return new InlineKeyboard().text(FEEDBACK_SKIP, `${kind}_skip`);
 }
 

@@ -36,6 +36,7 @@ import {
   PDF_RESULTS,
   analysisFeedbackKeyboard,
   feedbackSkipKeyboard,
+  pdfRatingKeyboard,
   pdfResultKeyboard,
 } from "./keyboards";
 
@@ -114,12 +115,12 @@ type Verdict =
 
 async function decide(
   telegramId: bigint,
-  kind: "analysis" | "pdf",
+  kind: "analysis_feedback" | "pdf_feedback" | "pdf_rating",
   limitDeferred: boolean
 ): Promise<Verdict> {
   const now = new Date();
 
-  if (!(await allowedToSend(telegramId, "FEEDBACK", `${kind}_feedback`))) {
+  if (!(await allowedToSend(telegramId, "FEEDBACK", kind))) {
     return { kind: "skip", reason: "нет согласия" };
   }
 
@@ -156,6 +157,25 @@ async function logEvent(telegramId: bigint, type: string) {
   await writeEvent(telegramId, type as never);
 }
 
+// Купил ли человек что-нибудь: план или консультацию. Возвращает
+// причину пропуска словами или null.
+//
+// Оплаченным считается заказ, прошедший оплату, в том числе
+// возвращённый: план он всё-таки получал. Заказ в PENDING_PAYMENT,
+// FAILED или CANCELED — это не покупка.
+const PAID_ORDERS = ["PAID", "GENERATING", "DRAFT_READY", "SENT", "REFUNDED"] as const;
+const PAID_CONSULTS = ["PAID", "CHAT_CREATED", "DONE"] as const;
+
+async function hasPurchase(telegramId: bigint): Promise<string | null> {
+  const [order, consult] = await Promise.all([
+    prisma.order.findFirst({ where: { telegramId, status: { in: [...PAID_ORDERS] } } }),
+    prisma.consultRequest.findFirst({ where: { telegramId, status: { in: [...PAID_CONSULTS] } } }),
+  ]);
+  if (order) return "купил план";
+  if (consult) return "купил консультацию";
+  return null;
+}
+
 // ── Планирование ────────────────────────────────────────────────────
 
 // Оценка разбора. Зовётся в момент, когда родителю ушло второе
@@ -173,6 +193,23 @@ export async function scheduleAnalysisFeedback(telegramId: bigint): Promise<void
     await logEvent(telegramId, "analysis_feedback_scheduled");
   } catch (error) {
     console.error(`Не удалось запланировать вопрос о разборе для #${telegramId}:`, error);
+  }
+}
+
+// Оценка плана от 1 до 5. Зовётся, когда заказ перешёл в SENT, и
+// спрашивается через сутки: за день человек успевает прочитать план, а
+// впечатление ещё свежее. Вопрос про результат — отдельный, через
+// неделю: раньше о результате сказать нечего.
+export async function schedulePdfRating(orderId: number, telegramId: bigint): Promise<void> {
+  try {
+    const existing = await prisma.pdfRating.findUnique({ where: { orderId } });
+    if (existing) return;
+
+    const scheduledAt = new Date(Date.now() + env.PDF_RATING_DELAY_HOURS * 3_600_000);
+    await prisma.pdfRating.create({ data: { orderId, telegramId, scheduledAt } });
+    await logEvent(telegramId, "pdf_rating_scheduled");
+  } catch (error) {
+    console.error(`Не удалось запланировать оценку плана по заказу #${orderId}:`, error);
   }
 }
 
@@ -205,7 +242,59 @@ export function startFeedbackScheduler(api: Api) {
 
 export async function sendDueFeedback(api: Api) {
   await sendDueAnalysisFeedback(api);
+  await sendDuePdfRating(api);
   await sendDuePdfFeedback(api);
+}
+
+// Оценка плана через сутки после файла. Правила отправки те же, что у
+// остальных отложенных вопросов: окно по Москве, не больше одного
+// вопроса в сутки, не перебивать занятого человека.
+async function sendDuePdfRating(api: Api) {
+  const due = await prisma.pdfRating.findMany({
+    where: { askedAt: null, skipReason: null, scheduledAt: { lte: new Date() } },
+    orderBy: { scheduledAt: "asc" },
+    take: 20,
+  });
+
+  for (const row of due) {
+    try {
+      if (!isAllowed(row.telegramId)) {
+        await skipRating(row.id, row.telegramId, "закрытый режим");
+        continue;
+      }
+
+      const verdict = await decide(row.telegramId, "pdf_rating", row.limitDeferred);
+      if (verdict.kind === "skip") {
+        await skipRating(row.id, row.telegramId, verdict.reason);
+        continue;
+      }
+      if (verdict.kind === "defer") {
+        await prisma.pdfRating.update({
+          where: { id: row.id },
+          data: { scheduledAt: verdict.until, limitDeferred: row.limitDeferred || !!verdict.limit },
+        });
+        continue;
+      }
+
+      const session = await prisma.session.findUnique({ where: { telegramId: row.telegramId } });
+      if (!session) {
+        await skipRating(row.id, row.telegramId, "нет сессии");
+        continue;
+      }
+
+      await sendStatic(api, session.chatId, texts.pdfRatingQuestion, {
+        reply_markup: pdfRatingKeyboard(),
+      });
+
+      await prisma.pdfRating.update({ where: { id: row.id }, data: { askedAt: new Date() } });
+      await logEvent(row.telegramId, "pdf_rating_asked");
+    } catch (error) {
+      console.error(`Не удалось спросить оценку плана по заказу #${row.orderId}:`, error);
+      if (isPermanentSendError(error)) {
+        await skipRating(row.id, row.telegramId, "родитель остановил бота");
+      }
+    }
+  }
 }
 
 async function sendDueAnalysisFeedback(api: Api) {
@@ -217,11 +306,14 @@ async function sendDueAnalysisFeedback(api: Api) {
 
   for (const row of due) {
     try {
-      // Заказ плана мог появиться за эти сутки — тогда вопрос не нужен
-      // и не переносится: у купившего плана будет свой вопрос.
-      const order = await prisma.order.findFirst({ where: { telegramId: row.telegramId } });
-      if (order) {
-        await skipAnalysis(row.id, row.telegramId, "заказ плана");
+      // Покупка могла случиться за эти сутки — тогда вопрос не нужен и
+      // не переносится: у купившего план своя оценка через сутки после
+      // файла, а купивший консультацию обсудит всё со специалистом.
+      // Считаем только оплаченное: нажатая и брошенная кнопка «Купить»
+      // покупкой не делает, и такого человека спросить как раз стоит.
+      const bought = await hasPurchase(row.telegramId);
+      if (bought) {
+        await skipAnalysis(row.id, row.telegramId, bought);
         continue;
       }
 
@@ -232,7 +324,7 @@ async function sendDueAnalysisFeedback(api: Api) {
         continue;
       }
 
-      const verdict = await decide(row.telegramId, "analysis", row.limitDeferred);
+      const verdict = await decide(row.telegramId, "analysis_feedback", row.limitDeferred);
       if (verdict.kind === "skip") {
         await skipAnalysis(row.id, row.telegramId, verdict.reason);
         continue;
@@ -287,7 +379,7 @@ async function sendDuePdfFeedback(api: Api) {
         continue;
       }
 
-      const verdict = await decide(row.telegramId, "pdf", row.limitDeferred);
+      const verdict = await decide(row.telegramId, "pdf_feedback", row.limitDeferred);
       if (verdict.kind === "skip") {
         await skipPdf(row.id, row.telegramId, verdict.reason);
         continue;
@@ -328,6 +420,12 @@ async function skipAnalysis(id: number, telegramId: bigint, reason: string) {
   console.log(`Вопрос о разборе для #${telegramId} не отправлен: ${reason}.`);
 }
 
+async function skipRating(id: number, telegramId: bigint, reason: string) {
+  await prisma.pdfRating.update({ where: { id }, data: { skipReason: reason } });
+  await logEvent(telegramId, "pdf_rating_skipped");
+  console.log(`Оценка плана #${id} не запрошена: ${reason}.`);
+}
+
 async function skipPdf(id: number, telegramId: bigint, reason: string) {
   await prisma.pdfFeedback.update({ where: { id }, data: { skipReason: reason } });
   await logEvent(telegramId, "pdf_feedback_skipped");
@@ -342,7 +440,7 @@ const ANALYSIS_BY_DATA: Record<string, { rating: AnalysisRating; label: string }
   afb_no: { rating: "NO", label: ANALYSIS_RATINGS[2].label },
 };
 
-export const FEEDBACK_CALLBACK_PREFIXES = ["afb_", "pfb_"];
+export const FEEDBACK_CALLBACK_PREFIXES = ["afb_", "pfb_", "prt_"];
 
 export async function handleFeedbackCallback(ctx: Context, callbackData: string) {
   const from = ctx.from;
@@ -351,8 +449,10 @@ export async function handleFeedbackCallback(ctx: Context, callbackData: string)
 
   if (callbackData === "afb_skip") return skipAnalysisComment(ctx, telegramId);
   if (callbackData === "pfb_skip") return skipPdfComment(ctx, telegramId);
+  if (callbackData === "prt_skip") return skipRatingComment(ctx, telegramId);
   if (callbackData.startsWith("afb_")) return rateAnalysis(ctx, telegramId, callbackData);
   if (callbackData.startsWith("pfb_")) return answerPdf(ctx, telegramId, callbackData);
+  if (callbackData.startsWith("prt_")) return ratePlan(ctx, telegramId, callbackData);
 }
 
 // Клавиатуру убираем сразу: ответ менять нельзя, и повторное нажатие
@@ -400,6 +500,64 @@ async function skipAnalysisComment(ctx: Context, telegramId: bigint) {
     .update({ where: { telegramId }, data: { skippedComment: true } })
     .catch(() => {});
   await logEvent(telegramId, "analysis_feedback_comment_skipped");
+  await dropKeyboard(ctx);
+  return toast(ctx);
+}
+
+// ── Оценка плана от 1 до 5 ──────────────────────────────────────────
+
+// Низкой считаем тройку и ниже: это уже повод спросить, что не так, и
+// сообщить админу, не дожидаясь комментария.
+const LOW_RATING = 3;
+
+async function ratePlan(ctx: Context, telegramId: bigint, data: string) {
+  const rating = Number(data.slice("prt_".length));
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) return;
+
+  const row = await prisma.pdfRating.findFirst({
+    where: { telegramId, askedAt: { not: null } },
+    orderBy: { askedAt: "desc" },
+  });
+  if (!row || row.answeredAt) return; // оценку изменить нельзя
+
+  await prisma.pdfRating.update({
+    where: { id: row.id },
+    data: { rating, answeredAt: new Date() },
+  });
+  await logEvent(telegramId, "pdf_rating_rated");
+  await dropKeyboard(ctx);
+
+  // Четыре и пять — разговор закончен: всплывающей подсказки хватает,
+  // лишнее сообщение в чате было бы шумом.
+  if (rating > LOW_RATING) return toast(ctx);
+
+  const prompt = await replyStatic(ctx, texts.pdfRatingLow, {
+    reply_markup: feedbackSkipKeyboard("prt"),
+  });
+  await prisma.pdfRating
+    .update({ where: { id: row.id }, data: { promptMessageId: prompt?.message_id ?? null } })
+    .catch(() => {});
+
+  const who = ctx.from?.username ? `@${ctx.from.username}` : `#${telegramId}`;
+  const link = orderUrl(row.orderId);
+  await notifyAdmin(
+    ctx,
+    `⚠️ План #${row.orderId}: оценка ${rating} из 5, пользователь ${who}` +
+      (link ? `\n\n${link}` : "")
+  );
+}
+
+async function skipRatingComment(ctx: Context, telegramId: bigint) {
+  const row = await prisma.pdfRating.findFirst({
+    where: { telegramId, answeredAt: { not: null }, comment: null, skippedComment: false },
+    orderBy: { answeredAt: "desc" },
+  });
+  if (row) {
+    await prisma.pdfRating
+      .update({ where: { id: row.id }, data: { skippedComment: true } })
+      .catch(() => {});
+  }
+  await logEvent(telegramId, "pdf_rating_comment_skipped");
   await dropKeyboard(ctx);
   return toast(ctx);
 }
@@ -481,6 +639,23 @@ async function pendingAnalysisComment(telegramId: bigint) {
   return freshEnough(row.answeredAt) ? row : null;
 }
 
+// Комментарий к низкой оценке плана. У высоких оценок его не просят,
+// поэтому и ждать нечего.
+async function pendingRatingComment(telegramId: bigint) {
+  const row = await prisma.pdfRating.findFirst({
+    where: {
+      telegramId,
+      answeredAt: { not: null },
+      comment: null,
+      skippedComment: false,
+      rating: { lte: LOW_RATING },
+    },
+    orderBy: { answeredAt: "desc" },
+  });
+  if (!row) return null;
+  return freshEnough(row.answeredAt) ? row : null;
+}
+
 async function pendingPdfComment(telegramId: bigint) {
   const row = await prisma.pdfFeedback.findFirst({
     where: { telegramId, answeredAt: { not: null }, comment: null, skippedComment: false },
@@ -506,6 +681,23 @@ export async function takeFeedbackComment(ctx: Context, text: string): Promise<b
 
     const who = from.username ? `@${from.username}` : `#${telegramId}`;
     await notifyAdmin(ctx, `📝 Разбор, комментарий от ${who}:\n\n${text}`);
+    return true;
+  }
+
+  const rating = await pendingRatingComment(telegramId);
+  if (rating) {
+    await prisma.pdfRating.update({ where: { id: rating.id }, data: { comment: text } });
+    await logEvent(telegramId, "pdf_rating_comment");
+    await dropSkipButton(ctx, rating.promptMessageId);
+    await replyStatic(ctx, texts.pdfRatingThanks);
+
+    const who = from.username ? `@${from.username}` : `#${telegramId}`;
+    const link = orderUrl(rating.orderId);
+    await notifyAdmin(
+      ctx,
+      `⚠️ План #${rating.orderId}, оценка ${rating.rating} из 5, комментарий от ${who}:\n\n${text}` +
+        (link ? `\n\n${link}` : "")
+    );
     return true;
   }
 

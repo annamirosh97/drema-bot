@@ -240,6 +240,7 @@ model Order {
   session  Session      @relation(fields: [telegramId], references: [telegramId], onDelete: Cascade)
   draft    PdfDraft?
   feedback PdfFeedback?
+  rating   PdfRating?
 
   @@index([telegramId])
   @@index([status])
@@ -421,6 +422,33 @@ enum PdfResult {
   NOT_STARTED
 }
 
+// Оценка плана от 1 до 5 — через сутки после отправки файла. Это не то
+// же, что PdfFeedback: там через неделю спрашивают, что изменилось со
+// сном, а здесь — как человеку сам план. Поэтому отдельная таблица, а
+// не вторая пара колонок: у вопросов разные сроки, разные пропуски и
+// отвечают на них независимо.
+model PdfRating {
+  id              Int       @id @default(autoincrement())
+  orderId         Int       @unique
+  telegramId      BigInt
+  scheduledAt     DateTime
+  askedAt         DateTime?
+  rating          Int?
+  comment         String?
+  skippedComment  Boolean   @default(false)
+  answeredAt      DateTime?
+  promptMessageId Int?
+  skipReason      String?
+  limitDeferred   Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([telegramId])
+  @@index([askedAt])
+  @@index([scheduledAt])
+}
+
 model PdfFeedback {
   id              Int        @id @default(autoincrement())
   orderId         Int        @unique
@@ -580,6 +608,14 @@ enum OfferEventType {
   pdf_feedback_answered
   pdf_feedback_comment
   pdf_feedback_comment_skipped
+  // Оценка плана от 1 до 5 — через сутки после файла, отдельно от
+  // вопроса о результате через неделю.
+  pdf_rating_scheduled
+  pdf_rating_asked
+  pdf_rating_skipped
+  pdf_rating_rated
+  pdf_rating_comment
+  pdf_rating_comment_skipped
   // Меню бота. В отличие от воронки онбординга эти события пишутся
   // каждый раз, а не раз на человека: в /stats интересно, сколько раз
   // меню открывали, а не сколько людей его хоть раз видели.

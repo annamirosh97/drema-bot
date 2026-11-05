@@ -134,6 +134,9 @@ export const env = {
   FREE_ANALYSIS_FEEDBACK_DELAY_HOURS:
     parseInt(process.env.FREE_ANALYSIS_FEEDBACK_DELAY_HOURS ?? "24", 10) || 24,
   PDF_FEEDBACK_DELAY_DAYS: parseInt(process.env.PDF_FEEDBACK_DELAY_DAYS ?? "7", 10) || 7,
+  // Оценка плана от 1 до 5 — через сутки после файла: за день человек
+  // успевает его прочитать, но впечатление ещё свежее.
+  PDF_RATING_DELAY_HOURS: parseInt(process.env.PDF_RATING_DELAY_HOURS ?? "24", 10) || 24,
   // Окно одно на все сообщения, которые бот отправляет по своей
   // инициативе: отложенные вопросы и напоминания о незаконченной
   // анкете. Две независимые пары переменных однажды разъехались бы

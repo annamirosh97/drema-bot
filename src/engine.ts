@@ -21,6 +21,7 @@ import {
   handleFeedbackCallback,
   scheduleAnalysisFeedback,
   schedulePdfFeedback,
+  schedulePdfRating,
   takeFeedbackComment,
 } from "./feedback";
 import {
@@ -2739,7 +2740,9 @@ export async function approveAndSendPdf(api: Api, orderId: number): Promise<void
   });
   await logOfferEvent(order.telegramId, "pdf_sent");
 
-  // Через неделю спросим, что изменилось со сном.
+  // Через сутки спросим оценку самого плана, через неделю — что
+  // изменилось со сном. Это разные вопросы и разные сроки.
+  await schedulePdfRating(orderId, order.telegramId);
   await schedulePdfFeedback(orderId, order.telegramId);
 }
 
