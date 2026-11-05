@@ -72,6 +72,7 @@ import {
   csatKeyboard,
   healthGuideKeyboard,
   healthScreenKeyboard,
+  termsIntroKeyboard,
   marketingConsentKeyboard,
   pdConsentKeyboard,
   editMoreKeyboard,
@@ -307,10 +308,11 @@ export async function handleIncoming(ctx: Context) {
   switch (session.stage) {
     case "TERMS_HEALTH":
       return handleTermsHealth(ctx, session, callbackData);
-    // Сессии, заведённые до объединения экранов: переводим на новый,
-    // не теряя людей посреди онбординга.
-    case "TERMS":
     case "HEALTH_SCREEN":
+      return handleHealthList(ctx, session, callbackData);
+    // Стадия прежнего онбординга: переводим на первый экран условий,
+    // не теряя людей посреди пути.
+    case "TERMS":
       return goToTermsHealth(ctx, session);
     case "PD_CONSENT":
       return handlePdConsent(ctx, session, callbackData);
@@ -408,8 +410,9 @@ export async function resendCurrentStep(ctx: Context, session: Session) {
       return sendHowItWorks(ctx);
     case "TERMS":
     case "TERMS_HEALTH":
-    case "HEALTH_SCREEN":
       return sendTermsHealth(ctx);
+    case "HEALTH_SCREEN":
+      return sendHealthList(ctx);
     case "PD_CONSENT":
       return sendPdConsent(ctx);
     case "MARKETING_CONSENT":
@@ -952,9 +955,16 @@ async function bumpDailyCounter(name: string): Promise<void> {
 // Поэтому здесь нет ни ответа, который можно сохранить, ни причины,
 // которую можно записать.
 
+// Первый экран: как всё устроено. Событие прежнее, onb_terms: это тот
+// же шаг воронки, просто теперь он в два сообщения.
 async function sendTermsHealth(ctx: Context) {
   await logOnboarding(ctx.from!.id, "onb_terms");
-  return replyStatic(ctx, texts.termsHealth, { reply_markup: healthScreenKeyboard() });
+  return replyStatic(ctx, texts.termsIntro, { reply_markup: termsIntroKeyboard() });
+}
+
+// Второй экран: список про здоровье и подтверждение.
+async function sendHealthList(ctx: Context) {
+  return replyStatic(ctx, texts.termsHealthList, { reply_markup: healthScreenKeyboard() });
 }
 
 async function goToTermsHealth(ctx: Context, session: Session) {
@@ -965,19 +975,47 @@ async function goToTermsHealth(ctx: Context, session: Session) {
   return sendTermsHealth(ctx);
 }
 
+async function goToHealthList(ctx: Context, session: Session) {
+  await prisma.session.update({
+    where: { telegramId: session.telegramId },
+    data: { stage: "HEALTH_SCREEN" },
+  });
+  await dropKeyboard(ctx);
+  return sendHealthList(ctx);
+}
+
+// Текст, который уходит в журнал согласий: оба экрана подряд. Человек
+// подтверждает, посмотрев и то и другое, и запись должна это отражать.
+function termsJournalText(): string {
+  return `${texts.termsIntro}\n\n${texts.termsHealthList}`;
+}
+
 async function handleTermsHealth(ctx: Context, session: Session, callbackData?: string) {
+  if (callbackData === "terms_continue") return goToHealthList(ctx, session);
+
+  // Кнопки второго экрана под сообщением, которое осталось выше по
+  // чату: стадия могла не смениться, если человек нажал «Продолжить»
+  // дважды. Разбираем их и здесь.
+  if (callbackData === "health_ok" || callbackData === "health_stop") {
+    return handleHealthList(ctx, session, callbackData);
+  }
+
+  return sendTermsHealth(ctx);
+}
+
+async function handleHealthList(ctx: Context, session: Session, callbackData?: string) {
   if (callbackData === "health_ok") {
     // Подтверждение — такое же юридически значимое действие, как
     // согласие: пишем в журнал до того, как пустить дальше. Документа
-    // за ним не стоит, человек подтверждает факт о себе. В журнал идёт
-    // весь экран целиком, вместе с условиями, — именно это он видел.
+    // за ним не стоит, человек подтверждает факт о себе. В журнал идут
+    // оба экрана подряд — именно это он видел, прежде чем нажать.
     const saved = await saveConsent(ctx, {
       telegramId: session.telegramId,
       type: "HEALTH_SELF_DECLARATION",
       action: "GRANTED",
       source: "ONBOARDING",
       documents: [],
-      messageText: texts.termsHealth,
+      messageText: termsJournalText(),
       buttonText: HEALTH_OK,
       telegramMessageId: ctx.callbackQuery?.message?.message_id,
     });
@@ -990,7 +1028,7 @@ async function handleTermsHealth(ctx: Context, session: Session, callbackData?: 
 
   if (callbackData === "health_stop") return handleHealthExit(ctx, session);
 
-  return sendTermsHealth(ctx);
+  return sendHealthList(ctx);
 }
 
 // Родитель сказал, что что-то из списка есть. О причине не сохраняем
@@ -1221,6 +1259,7 @@ const ONBOARDING_CALLBACKS = new Set([
   "start",
   "how_it_works",
   "my_approach",
+  "terms_continue",
   "health_ok",
   "health_stop",
   "health_guide",
@@ -2194,7 +2233,7 @@ async function sendExampleAnalysis(ctx: Context, session: Session, source: strin
   await replyStatic(ctx, texts.exampleAnalysis2);
   await pause(ctx);
   return replyStatic(ctx, texts.exampleFinal(formatPrice(env.PDF_PRICE_RUB)), {
-    reply_markup: exampleFinalKeyboard(),
+    reply_markup: exampleFinalKeyboard(await hasSeenSteps(session.telegramId)),
   });
 }
 
@@ -2208,7 +2247,7 @@ async function sendExamplePlan(ctx: Context, session: Session, source: string) {
     ctx,
     projectFile(EXAMPLE_PDF),
     texts.examplePlanCaption,
-    examplePlanKeyboard()
+    examplePlanKeyboard(await hasSeenSteps(session.telegramId))
   );
 }
 
@@ -2224,9 +2263,10 @@ async function handleExampleCta(ctx: Context, session: Session, source: string) 
   }
   if (recommendation) return replyStatic(ctx, texts.exampleAnalysisPending);
 
-  // Онбординг ещё не пройден или идёт анкета — показываем текущий шаг.
-  // Он же и есть «следующий шаг после первого экрана» у новичка.
-  if (session.stage === "WELCOME") return goToTermsHealth(ctx, session);
+  // Онбординг ещё не пройден — ведём на условия, а не возвращаем на
+  // экран, с которого человек пришёл: он только что нажал «Получить
+  // разбор», и следующий шаг у него один.
+  if (ONBOARDING_BEFORE_TERMS.includes(session.stage)) return goToTermsHealth(ctx, session);
   return resendCurrentStep(ctx, session);
 }
 
@@ -2243,6 +2283,31 @@ async function hasSeenExample(telegramId: bigint | number): Promise<boolean> {
     return Boolean(seen);
   } catch (error) {
     console.error(`Не удалось проверить, видел ли #${telegramId} пример:`, error);
+    return false;
+  }
+}
+
+// Экраны онбординга до условий: с любого из них «Получить разбор» в
+// примере ведёт на условия. Анкету и всё, что после неё, сюда не
+// включаем — там у кнопки другая работа.
+const ONBOARDING_BEFORE_TERMS: Session["stage"][] = [
+  "WELCOME",
+  "WELCOME_VALUE",
+  "STEPS",
+  "HOW_IT_WORKS",
+];
+
+// Видел ли человек экран трёх шагов. Тот же приём, что с примером:
+// событие onb_steps пишется при каждом показе, и одного запроса хватает.
+async function hasSeenSteps(telegramId: bigint | number): Promise<boolean> {
+  try {
+    const seen = await prisma.offerEvent.findFirst({
+      where: { telegramId: BigInt(telegramId), type: "onb_steps" },
+      select: { id: true },
+    });
+    return Boolean(seen);
+  } catch (error) {
+    console.error(`Не удалось проверить, видел ли #${telegramId} три шага:`, error);
     return false;
   }
 }

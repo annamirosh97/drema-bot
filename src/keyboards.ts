@@ -220,24 +220,33 @@ export function howItWorksKeyboard(seenExample = false): InlineKeyboard {
 //
 // «Больше о Дрёме» открывает экран трёх шагов, а не «Как я работаю»:
 // из примера логичнее вернуться к тому, как устроен весь путь.
-export function exampleFinalKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
+// «Больше о Дрёме» ведёт на экран трёх шагов, поэтому тому, кто его уже
+// видел, кнопка не показывается: она увела бы его туда, откуда он
+// пришёл.
+export function exampleFinalKeyboard(seenSteps = false): InlineKeyboard {
+  const kb = new InlineKeyboard()
     .text("Получить разбор", "example_cta_final")
     .row()
-    .text("Пример персонального плана", "example_plan_final")
-    .row()
-    .text("Больше о Дрёме", "example_hiw_final");
+    .text("Пример персонального плана", "example_plan_final");
+  if (!seenSteps) kb.row().text("Больше о Дрёме", "example_hiw_final");
+  return kb;
 }
 
-export function examplePlanKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("Получить разбор", "example_cta_plan")
-    .row()
-    .text("Больше о Дрёме", "example_hiw_plan");
+export function examplePlanKeyboard(seenSteps = false): InlineKeyboard {
+  const kb = new InlineKeyboard().text("Получить разбор", "example_cta_plan");
+  if (!seenSteps) kb.row().text("Больше о Дрёме", "example_hiw_plan");
+  return kb;
 }
 
-export const HEALTH_OK = "Ничего из этого";
+export const HEALTH_OK = "Подтверждаю, ничего из этого";
 export const HEALTH_STOP = "Есть что-то из списка";
+
+// Первый экран условий: только «Продолжить». Подтверждение о здоровье —
+// на втором, отдельным действием: так видно, что человек подтвердил
+// именно список, а не пролистал всё одним нажатием.
+export function termsIntroKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text("Продолжить", "terms_continue");
+}
 
 export function healthScreenKeyboard(): InlineKeyboard {
   return new InlineKeyboard()

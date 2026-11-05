@@ -102,7 +102,7 @@ export interface AnalysisEditorData {
 // Заголовки, с которыми сообщения уйдут в Telegram. Нужны предпросмотру:
 // по ТЗ перед отправкой показывается текст так, как его увидит родитель.
 const HEADING_1 = "Разбор режима сна";
-const HEADING_2 = "Вероятные причины";
+const HEADING_2 = "Вероятные причины трудностей";
 
 export function renderAnalysisEditor(data: AnalysisEditorData): string {
   const style = `
