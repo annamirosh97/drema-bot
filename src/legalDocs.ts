@@ -28,7 +28,11 @@ import { PROJECT_ROOT } from "./prompts";
 // трогает: строки заглушек остаются в базе как были, потому что на них
 // ссылаются записи журнала, сделанные до публикации.
 const VERSIONS: Record<LegalDocType, { version: string; effectiveFrom: string }> = {
-  PRIVACY_POLICY: { version: "2026-10-22", effectiveFrom: "2026-10-22" },
+  // Редакция 2026-11-05 отличается от 2026-10-22 ровно двумя убранными
+  // пунктами, 3.6 и 3.7, — о специальных категориях данных и о сведениях
+  // о здоровье в свободных полях. Прежняя версия остаётся: на неё
+  // ссылаются записи журнала, сделанные до этой даты.
+  PRIVACY_POLICY: { version: "2026-11-05", effectiveFrom: "2026-11-05" },
   PD_CONSENT: { version: "2026-10-26", effectiveFrom: "2026-10-26" },
   MARKETING_CONSENT: { version: "2026-10-26", effectiveFrom: "2026-10-26" },
   OFFER: { version: "2026-10-26", effectiveFrom: "2026-10-26" },
